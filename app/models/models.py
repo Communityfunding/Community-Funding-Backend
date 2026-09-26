@@ -142,7 +142,7 @@ class Donation(Base):
     __tablename__ = "donations"
 
     id = Column(String(50), primary_key=True, default=generate_uuid)
-    campaign_id = Column(String(50), ForeignKey("campaigns.campaign_id"), nullable=False)
+    campaign_id = Column(Integer, ForeignKey("campaigns.campaign_id"), nullable=False)
     donor_id = Column(String(50), ForeignKey("creators.creator_id"), nullable=True)
     donor_name = Column(String(255), default="Anonymous")
     donor_email = Column(String(255), nullable=True)
@@ -213,7 +213,7 @@ class Payout(Base):
     __tablename__ = "payouts"
 
     id = Column(String(50), primary_key=True, default=generate_uuid)
-    campaign_id = Column(String(50), ForeignKey("campaigns.campaign_id"), nullable=False)
+    campaign_id = Column(Integer, ForeignKey("campaigns.campaign_id"), nullable=False)
     creator_id = Column(String(50), ForeignKey("creators.creator_id"), nullable=False)
     amount = Column(Numeric(12, 2), nullable=False)
     currency = Column(String(3), default="usd")
@@ -235,7 +235,7 @@ class CampaignUpdate(Base):
     __tablename__ = "campaign_updates"
 
     id = Column(String(50), primary_key=True, default=generate_uuid)
-    campaign_id = Column(String(50), ForeignKey("campaigns.campaign_id"), nullable=False)
+    campaign_id = Column(Integer, ForeignKey("campaigns.campaign_id"), nullable=False)
     author_id = Column(String(50), ForeignKey("creators.creator_id"), nullable=False)
     title = Column(String(200), nullable=False)
     content = Column(Text, nullable=False)
@@ -258,7 +258,7 @@ class Comment(Base):
     __tablename__ = "comments"
 
     id = Column(String(50), primary_key=True, default=generate_uuid)
-    campaign_id = Column(String(50), ForeignKey("campaigns.campaign_id"), nullable=False)
+    campaign_id = Column(Integer, ForeignKey("campaigns.campaign_id"), nullable=False)
     user_id = Column(String(50), ForeignKey("creators.creator_id"), nullable=False)
     content = Column(Text, nullable=False)
     is_hidden = Column(Boolean, default=False)  # admin can hide
@@ -282,7 +282,7 @@ class Report(Base):
 
     id = Column(String(50), primary_key=True, default=generate_uuid)
     reporter_id = Column(String(50), ForeignKey("creators.creator_id"), nullable=False)
-    campaign_id = Column(String(50), ForeignKey("campaigns.campaign_id"), nullable=True)
+    campaign_id = Column(Integer, ForeignKey("campaigns.campaign_id"), nullable=True)
     comment_id = Column(String(50), ForeignKey("comments.id"), nullable=True)
     reason = Column(Enum(ReportReason), nullable=False)
     details = Column(Text, nullable=True)
