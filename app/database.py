@@ -123,9 +123,22 @@ AsyncSessionLocal = async_sessionmaker(
 class Base(DeclarativeBase):
     pass
 
-# keep init_db as a no-op to avoid create_all() touching other tables
 async def init_db():
-    return
+    """Create ORM tables when explicitly bootstrapping a new database.
+
+    Existing environments must opt in with ``DATABASE_BOOTSTRAP=true``.  This
+    lets a fresh Railway Postgres instance start with the application's ORM
+    schema without making production startup perform implicit migrations.
+    """
+    if os.getenv("DATABASE_BOOTSTRAP", "").lower() not in {"1", "true", "yes"}:
+        return
+
+    # Importing registers every declarative model with Base.metadata.
+    from app.models import models  # noqa: F401
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    print("ORM schema ensured for bootstrap database")
 
 # Dependency for FastAPI routes that expect a SQLAlchemy session
 async def get_db():

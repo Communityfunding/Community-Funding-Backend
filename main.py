@@ -34,6 +34,7 @@ from app.db import (
     upsert_creator,
     close_pool,
 )
+from app.database import init_db as orm_init_db
 
 # Routers
 from app.routes.auth import router as auth_router
@@ -63,18 +64,22 @@ from app.routes.ledger_v2 import router as ledger_v2_router  # /* v100_donations
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("🚀 Starting Community Fundings API...")
+    print("Starting Community Fundings API...")
 
-    # Only initialize asyncpg schema (creators table)
+    # A fresh deployment may opt into ORM schema bootstrap. Existing
+    # environments leave this disabled and only run the legacy creators setup.
+    await orm_init_db()
+
+    # Initialize the legacy asyncpg schema (creators table).
     await asyncpg_init_db()
-    print("✅ asyncpg creators table ready")
+    print("asyncpg creators table ready")
 
     yield
 
     # Shutdown cleanup
     try:
         await close_pool()
-        print("👋 AsyncPG pool closed")
+        print("AsyncPG pool closed")
     except Exception as e:
         print("WARN: Error closing pool:", e)
 
