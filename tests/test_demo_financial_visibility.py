@@ -1,5 +1,6 @@
 """Financial views must not trust unsigned identities or public receipt IDs."""
 import unittest
+import jwt
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from fastapi import FastAPI, HTTPException
@@ -69,8 +70,10 @@ class FinancialVisibilityTests(unittest.IsolatedAsyncioTestCase):
         app = FastAPI()
         app.include_router(ledger_v2.router)
         app.dependency_overrides[get_db] = fake_db
+        wrong_signature = jwt.encode({"sub": "claimed-user"}, "isolated-deliberately-wrong-signing-key", algorithm="HS256")
         with TestClient(app) as client:
             for path in ("/api/ledger-v2/donor", "/api/ledger-v2/creator"):
                 self.assertEqual(client.get(path).status_code, 401)
                 self.assertEqual(client.get(path, headers={"Authorization": "Bearer forged"}).status_code, 401)
+                self.assertEqual(client.get(path, headers={"Authorization": f"Bearer {wrong_signature}"}).status_code, 401)
         db.execute.assert_not_awaited()
