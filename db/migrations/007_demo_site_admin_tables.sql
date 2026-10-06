@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS public.admin_activity_log (
     target_type text,
     target_id text,
     details text,
-    time_created timestamptz NOT NULL DEFAULT now()
+    created_at timestamptz NOT NULL DEFAULT now()
 );
 ALTER TABLE public.campaigns
     ADD COLUMN IF NOT EXISTS reviewed_by integer REFERENCES public.site_admins(admin_id),
