@@ -3,9 +3,8 @@
 Donations v2 — Stripe Checkout for Community Fundings.
 
 This module is intentionally side-by-side with app/routes/payments.py.
-It uses raw SQL queries that reference cf-db's actual column names
-(donor_creator_id, donation_id, time_created, etc) — bypassing the
-ORM Donation model which uses different attribute names.
+It uses the demo's canonical donation fields (id, donor_id, created_at)
+and PostgreSQL's uppercase donation status enum. Campaign totals are cents.
 
 All endpoints are mounted at /api/donations-v2/* so this never collides
 with main's existing /api/stripe/* endpoints.
@@ -30,6 +29,7 @@ import stripe
 from decimal import Decimal
 from typing import Optional
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Header
 from sqlalchemy import text
@@ -50,7 +50,7 @@ PLATFORM_FEE_RATE = Decimal("0.05")  # 5%
 # ─── Request body shape ───────────────────────────────────────────────
 class CheckoutBody(BaseModel):
     campaign_id: int = Field(..., gt=0)
-    amount: float = Field(..., gt=0)
+    amount: Decimal = Field(..., gt=0, max_digits=10, decimal_places=2)
     donor_name: Optional[str] = "Anonymous"
     donor_email: Optional[EmailStr] = None
     is_anonymous: bool = False
@@ -67,11 +67,7 @@ async def create_checkout_session(
     db: AsyncSession = Depends(get_db),
     authorization: Optional[str] = Header(None),
 ):
-    """Create a Stripe Checkout session for a donation.
-
-    Anonymous-friendly: if no JWT, donor_creator_id stays 'anonymous'.
-    Authenticated users (Clerk JWT) get their creator_id stored.
-    """
+    """Guest checkout uses a null donor; supplied Clerk tokens must verify."""
     if not stripe.api_key:
         raise HTTPException(status_code=503, detail="Stripe not configured (STRIPE_SECRET_KEY missing)")
 
@@ -88,24 +84,25 @@ async def create_checkout_session(
         raise HTTPException(status_code=400, detail=f"Campaign is not accepting donations (status={campaign['status']})")
 
     # 2. Resolve donor (if Authorization header present, look up the creator)
-    donor_creator_id = "anonymous"
+    donor_creator_id = None
     if authorization and authorization.startswith("Bearer "):
         token = authorization[7:]
-        # We don't verify the JWT here (main may handle that elsewhere) —
-        # we just trust that if a token is sent, the user "claims" to be that creator.
-        # If JWT verification is needed, integrate with main's auth dependency later.
         try:
-            import jwt as pyjwt
-            decoded = pyjwt.decode(token, options={"verify_signature": False})
+            import jwt_utils
+            if jwt_utils.DEV_JWT_BYPASS:
+                raise HTTPException(status_code=503, detail="Payment authentication requires verified tokens")
+            decoded = jwt_utils.verify_token(token)
             sub = decoded.get("sub")
             if sub:
                 donor_creator_id = sub
+            else:
+                raise ValueError("Missing subject")
+        except HTTPException:
+            raise
         except Exception:
-            pass  # fall back to anonymous
-
-        # v100_signin_required — reject if not authenticated
-        if not donor_creator_id:
-            raise HTTPException(status_code=401, detail="Sign in required to donate.")
+            raise HTTPException(status_code=401, detail="Invalid donor authentication") from None
+    elif authorization:
+        raise HTTPException(status_code=401, detail="Invalid donor authentication")
 
     # 3. Calculate fees
     amount = Decimal(str(data.amount))
@@ -114,16 +111,18 @@ async def create_checkout_session(
     amount_cents = int(amount * 100)
 
     # 4. Insert pending donation row
+    donation_id = str(uuid4())
     insert_q = text("""
         INSERT INTO donations
-              (campaign_id, donor_creator_id, donor_name, donor_email,
+              (id, campaign_id, donor_id, donor_name, donor_email,
                is_anonymous, message, amount, platform_fee, net_amount,
                status, currency)
-        VALUES (:cid, :duid, :dname, :demail, :anon, :msg, :amt, :pfee,
-                :net, 'pending', 'usd')
-        RETURNING donation_id
+        VALUES (:did, :cid, :duid, :dname, :demail, :anon, :msg, :amt, :pfee,
+                :net, 'PENDING', 'usd')
+        RETURNING id
     """)
     res = await db.execute(insert_q, {
+        "did": donation_id,
         "cid": data.campaign_id,
         "duid": donor_creator_id,
         "dname": data.donor_name or "Anonymous",
@@ -170,15 +169,14 @@ async def create_checkout_session(
         )
     except stripe.error.StripeError as e:
         # Roll back the pending donation if Stripe fails
-        await db.execute(text("DELETE FROM donations WHERE donation_id = :did"), {"did": donation_id})
-        await db.commit()
-        raise HTTPException(status_code=502, detail=f"Stripe error: {str(e)}")
+        await db.rollback()
+        raise HTTPException(status_code=502, detail="Unable to create Stripe checkout. Please retry.") from None
 
     # 7. Save the session id
     await db.execute(text("""
         UPDATE donations
            SET stripe_checkout_session_id = :sid
-         WHERE donation_id = :did
+         WHERE id = :did
     """), {"sid": session.id, "did": donation_id})
     await db.commit()
 
@@ -191,10 +189,10 @@ async def create_checkout_session(
 
 # ─── GET /donation/{id} — receipt page calls this ────────────────────
 @router.get("/donation/{donation_id}")
-async def get_donation(donation_id: int, db: AsyncSession = Depends(get_db)):
+async def get_donation(donation_id: str, db: AsyncSession = Depends(get_db)):
     """Fetch a donation by ID for the receipt page."""
     r = await db.execute(text("""
-        SELECT d.donation_id, d.amount, d.status, d.time_created,
+        SELECT d.id AS donation_id, d.amount, LOWER(d.status::TEXT) AS status, d.created_at AS time_created,
                d.donor_name, d.donor_email, d.campaign_id, d.currency,
                d.platform_fee, d.net_amount, d.is_anonymous,
                c.title AS campaign_title, c.url AS campaign_slug,
@@ -202,7 +200,7 @@ async def get_donation(donation_id: int, db: AsyncSession = Depends(get_db)):
           FROM donations d
           JOIN campaigns c ON c.campaign_id = d.campaign_id
           LEFT JOIN creators cr ON cr.creator_id = c.creator_id
-         WHERE d.donation_id = :did
+         WHERE d.id = :did
     """), {"did": donation_id})
     row = r.mappings().first()
     if not row:
@@ -251,26 +249,21 @@ async def stripe_webhook(
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
+        if session.get("payment_status") != "paid":
+            return {"received": True, "status": "awaiting_payment"}
         session_id = session.get("id")
         payment_intent_id = session.get("payment_intent")
 
-        # Look up the donation by session id
+        # Transition exactly once, even on repeated/concurrent webhook delivery.
         r = await db.execute(text("""
-            SELECT donation_id, campaign_id, amount
-              FROM donations
-             WHERE stripe_checkout_session_id = :sid
-        """), {"sid": session_id})
+            UPDATE donations
+               SET status = 'SUCCEEDED', stripe_payment_intent_id = :pi
+             WHERE stripe_checkout_session_id = :sid AND status = 'PENDING'
+             RETURNING id AS donation_id, campaign_id, amount
+        """), {"sid": session_id, "pi": payment_intent_id})
         donation = r.mappings().first()
         if not donation:
-            return {"received": True, "warning": "donation not found for session"}
-
-        # Mark donation succeeded
-        await db.execute(text("""
-            UPDATE donations
-               SET status = 'succeeded',
-                   stripe_payment_intent_id = :pi
-             WHERE donation_id = :did
-        """), {"pi": payment_intent_id, "did": donation["donation_id"]})
+            return {"received": True, "status": "already_processed_or_unknown"}
 
         # Bump campaign totals (amount_raised_cents and backers count)
         amount_cents = int(Decimal(str(donation["amount"])) * 100)
@@ -288,9 +281,9 @@ async def stripe_webhook(
         session = event["data"]["object"]
         await db.execute(text("""
             UPDATE donations
-               SET status = 'failed'
+               SET status = 'FAILED'
              WHERE stripe_checkout_session_id = :sid
-               AND status = 'pending'
+               AND status = 'PENDING'
         """), {"sid": session.get("id")})
         await db.commit()
         return {"received": True, "status": "expired"}
