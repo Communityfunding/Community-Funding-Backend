@@ -18,6 +18,18 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.status_code, 401)
         db.execute.assert_not_awaited()
 
+    async def test_verified_existing_user_can_refresh_backend_session(self):
+        user = SimpleNamespace(id="user_qa", email="qa@example.test", user_type=1)
+        db = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(
+            scalar_one_or_none=lambda: user)), flush=AsyncMock())
+        with patch("jwt_utils.DEV_JWT_BYPASS", False), \
+             patch("jwt_utils.verify_token", return_value={"sub": "user_qa"}), \
+             patch.object(auth, "create_access_token", return_value="isolated-session") as mint:
+            response = await auth.clerk_sync(self.body(), db, "Bearer verified-isolated-session")
+        mint.assert_called_once_with("user_qa")
+        self.assertEqual(response["user_id"], "user_qa")
+        db.flush.assert_awaited_once()
+
     async def test_clerk_subject_cannot_impersonate_another_identity(self):
         db = SimpleNamespace(execute=AsyncMock())
         with patch("jwt_utils.DEV_JWT_BYPASS", False), \
