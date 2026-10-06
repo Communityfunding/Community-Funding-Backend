@@ -164,8 +164,8 @@ async def dashboard(admin_id: int, db: AsyncSession = Depends(get_db)):
             FROM misc_reports mr
         ) reports)                                          AS total_reports,
             (SELECT COUNT(*) FROM blocked_users)                                    AS total_blocked,
-            (SELECT COUNT(*) FROM donations WHERE status = 'succeeded')             AS total_donations,
-            (SELECT COALESCE(SUM(amount),0) FROM donations WHERE status='succeeded') AS total_raised,
+            (SELECT COUNT(*) FROM donations WHERE LOWER(status::TEXT) = 'succeeded') AS total_donations,
+            (SELECT COALESCE(SUM(amount),0) FROM donations WHERE LOWER(status::TEXT)='succeeded') AS total_raised,
             (SELECT COUNT(*) FROM comments)                                         AS total_comments
     """))
     s = stats.mappings().first()
@@ -176,8 +176,8 @@ async def dashboard(admin_id: int, db: AsyncSession = Depends(get_db)):
             (SELECT COUNT(*) FROM creators  WHERE time_creation >= NOW() - INTERVAL '14 days' AND time_creation < NOW() - INTERVAL '7 days')  AS u_prev,
             (SELECT COUNT(*) FROM campaigns WHERE time_created >= NOW() - INTERVAL '7 days')                                                AS c_this,
             (SELECT COUNT(*) FROM campaigns WHERE time_created >= NOW() - INTERVAL '14 days' AND time_created < NOW() - INTERVAL '7 days')  AS c_prev,
-            (SELECT COALESCE(SUM(amount),0) FROM donations WHERE status='succeeded' AND created_at >= NOW() - INTERVAL '7 days')           AS r_this,
-            (SELECT COALESCE(SUM(amount),0) FROM donations WHERE status='succeeded' AND created_at >= NOW() - INTERVAL '14 days' AND created_at < NOW() - INTERVAL '7 days') AS r_prev
+            (SELECT COALESCE(SUM(amount),0) FROM donations WHERE LOWER(status::TEXT)='succeeded' AND created_at >= NOW() - INTERVAL '7 days') AS r_this,
+            (SELECT COALESCE(SUM(amount),0) FROM donations WHERE LOWER(status::TEXT)='succeeded' AND created_at >= NOW() - INTERVAL '14 days' AND created_at < NOW() - INTERVAL '7 days') AS r_prev
     """))
     w = week.mappings().first()
 
@@ -186,7 +186,7 @@ async def dashboard(admin_id: int, db: AsyncSession = Depends(get_db)):
                COALESCE(SUM(amount),0) AS amount,
                COUNT(*) AS count
         FROM donations
-        WHERE status = 'succeeded' AND created_at >= NOW() - INTERVAL '14 days'
+        WHERE LOWER(status::TEXT) = 'succeeded' AND created_at >= NOW() - INTERVAL '14 days'
         GROUP BY DATE(created_at)
         ORDER BY day ASC
     """))
@@ -211,12 +211,12 @@ async def dashboard(admin_id: int, db: AsyncSession = Depends(get_db)):
     } for r in top.mappings()]
 
     recent = await db.execute(text("""
-        SELECT d.id AS donation_id, d.amount, d.created_at AS time_created, d.status,
+        SELECT d.id AS donation_id, d.amount, d.created_at AS time_created, LOWER(d.status::TEXT) AS status,
                d.donor_email, d.is_anonymous,
                c.title AS campaign_title, c.campaign_id
         FROM donations d
         LEFT JOIN campaigns c ON c.campaign_id = d.campaign_id
-        WHERE d.status = 'succeeded'
+        WHERE LOWER(d.status::TEXT) = 'succeeded'
         ORDER BY d.created_at DESC
         LIMIT 8
     """))
@@ -725,14 +725,14 @@ async def list_transactions(admin_id: int, status: str = "all", search: str = ""
     await _verify_admin(admin_id, db)
     clauses, params = [], {"limit": limit, "offset": offset}
     if status != "all":
-        clauses.append("d.status = :st"); params["st"] = status
+        clauses.append("LOWER(d.status::TEXT) = :st"); params["st"] = status.lower()
     if search:
         clauses.append("(LOWER(COALESCE(c.title,'')) LIKE LOWER(:s) OR LOWER(COALESCE(d.donor_email,'')) LIKE LOWER(:s))")
         params["s"] = f"%{search}%"
     where = "WHERE " + " AND ".join(clauses) if clauses else ""
 
     r = await db.execute(text(f"""
-        SELECT d.id AS donation_id, d.amount, d.status, d.created_at AS time_created, d.donor_email,
+        SELECT d.id AS donation_id, d.amount, LOWER(d.status::TEXT) AS status, d.created_at AS time_created, d.donor_email,
                d.is_anonymous, d.stripe_payment_intent_id, d.platform_fee,
                c.title AS campaign_title, c.campaign_id
         FROM donations d
@@ -752,7 +752,7 @@ async def list_transactions(admin_id: int, status: str = "all", search: str = ""
         SELECT COALESCE(SUM(amount),0) AS total,
                COALESCE(SUM(platform_fee),0) AS fees,
                COUNT(*) AS count
-        FROM donations WHERE status='succeeded'
+        FROM donations WHERE LOWER(status::TEXT)='succeeded'
     """))
     sm = summary.mappings().first()
 
