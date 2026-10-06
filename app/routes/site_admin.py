@@ -129,7 +129,7 @@ async def dashboard(admin_id: int, db: AsyncSession = Depends(get_db)):
                 'campaign'::TEXT            AS report_type,
                 cr.reporter_creator_id      AS reporter_id,
                 cr.reported_campaign_id     AS campaign_id,
-                NULL::BIGINT                AS comment_id,
+                NULL::TEXT                  AS comment_id,
                 cr.reported_campaign_creator_id AS reported_creator_id,
                 cr.reason                   AS reason,
                 cr.notes                    AS details,
@@ -149,7 +149,7 @@ async def dashboard(admin_id: int, db: AsyncSession = Depends(get_db)):
             SELECT
                 pr.report_id::TEXT, 'profile'::TEXT,
                 pr.reporter_creator_id,
-                NULL::BIGINT, NULL::BIGINT,
+                NULL::BIGINT, NULL::TEXT,
                 pr.reported_profile_creator_id,
                 pr.reason, pr.notes, pr.status, pr.time_reported
             FROM profile_reports pr
@@ -157,7 +157,7 @@ async def dashboard(admin_id: int, db: AsyncSession = Depends(get_db)):
             SELECT
                 mr.report_id::TEXT, 'misc'::TEXT,
                 mr.creator_id           AS reporter_id,
-                NULL::BIGINT, NULL::BIGINT, NULL::TEXT,
+                NULL::BIGINT, NULL::TEXT, NULL::TEXT,
                 mr.report_reason        AS reason,
                 mr.report_description   AS details,
                 mr.status, mr.time_created
@@ -176,18 +176,18 @@ async def dashboard(admin_id: int, db: AsyncSession = Depends(get_db)):
             (SELECT COUNT(*) FROM creators  WHERE time_creation >= NOW() - INTERVAL '14 days' AND time_creation < NOW() - INTERVAL '7 days')  AS u_prev,
             (SELECT COUNT(*) FROM campaigns WHERE time_created >= NOW() - INTERVAL '7 days')                                                AS c_this,
             (SELECT COUNT(*) FROM campaigns WHERE time_created >= NOW() - INTERVAL '14 days' AND time_created < NOW() - INTERVAL '7 days')  AS c_prev,
-            (SELECT COALESCE(SUM(amount),0) FROM donations WHERE status='succeeded' AND time_created >= NOW() - INTERVAL '7 days')           AS r_this,
-            (SELECT COALESCE(SUM(amount),0) FROM donations WHERE status='succeeded' AND time_created >= NOW() - INTERVAL '14 days' AND time_created < NOW() - INTERVAL '7 days') AS r_prev
+            (SELECT COALESCE(SUM(amount),0) FROM donations WHERE status='succeeded' AND created_at >= NOW() - INTERVAL '7 days')           AS r_this,
+            (SELECT COALESCE(SUM(amount),0) FROM donations WHERE status='succeeded' AND created_at >= NOW() - INTERVAL '14 days' AND created_at < NOW() - INTERVAL '7 days') AS r_prev
     """))
     w = week.mappings().first()
 
     daily = await db.execute(text("""
-        SELECT DATE(time_created) AS day,
+        SELECT DATE(created_at) AS day,
                COALESCE(SUM(amount),0) AS amount,
                COUNT(*) AS count
         FROM donations
-        WHERE status = 'succeeded' AND time_created >= NOW() - INTERVAL '14 days'
-        GROUP BY DATE(time_created)
+        WHERE status = 'succeeded' AND created_at >= NOW() - INTERVAL '14 days'
+        GROUP BY DATE(created_at)
         ORDER BY day ASC
     """))
     chart = [{"date": str(r["day"]), "amount": float(r["amount"]), "count": r["count"]}
@@ -211,13 +211,13 @@ async def dashboard(admin_id: int, db: AsyncSession = Depends(get_db)):
     } for r in top.mappings()]
 
     recent = await db.execute(text("""
-        SELECT d.donation_id, d.amount, d.time_created, d.status,
+        SELECT d.id AS donation_id, d.amount, d.created_at AS time_created, d.status,
                d.donor_email, d.is_anonymous,
                c.title AS campaign_title, c.campaign_id
         FROM donations d
         LEFT JOIN campaigns c ON c.campaign_id = d.campaign_id
         WHERE d.status = 'succeeded'
-        ORDER BY d.time_created DESC
+        ORDER BY d.created_at DESC
         LIMIT 8
     """))
     recent_donations = [{
@@ -236,7 +236,7 @@ async def dashboard(admin_id: int, db: AsyncSession = Depends(get_db)):
                 'campaign'::TEXT            AS report_type,
                 cr.reporter_creator_id      AS reporter_id,
                 cr.reported_campaign_id     AS campaign_id,
-                NULL::BIGINT                AS comment_id,
+                NULL::TEXT                  AS comment_id,
                 cr.reported_campaign_creator_id AS reported_creator_id,
                 cr.reason                   AS reason,
                 cr.notes                    AS details,
@@ -256,7 +256,7 @@ async def dashboard(admin_id: int, db: AsyncSession = Depends(get_db)):
             SELECT
                 pr.report_id::TEXT, 'profile'::TEXT,
                 pr.reporter_creator_id,
-                NULL::BIGINT, NULL::BIGINT,
+                NULL::BIGINT, NULL::TEXT,
                 pr.reported_profile_creator_id,
                 pr.reason, pr.notes, pr.status, pr.time_reported
             FROM profile_reports pr
@@ -264,7 +264,7 @@ async def dashboard(admin_id: int, db: AsyncSession = Depends(get_db)):
             SELECT
                 mr.report_id::TEXT, 'misc'::TEXT,
                 mr.creator_id           AS reporter_id,
-                NULL::BIGINT, NULL::BIGINT, NULL::TEXT,
+                NULL::BIGINT, NULL::TEXT, NULL::TEXT,
                 mr.report_reason        AS reason,
                 mr.report_description   AS details,
                 mr.status, mr.time_created
@@ -329,7 +329,7 @@ async def list_campaigns(admin_id: int, search: str = "", status: str = "all",
                 'campaign'::TEXT            AS report_type,
                 cr.reporter_creator_id      AS reporter_id,
                 cr.reported_campaign_id     AS campaign_id,
-                NULL::BIGINT                AS comment_id,
+                NULL::TEXT                  AS comment_id,
                 cr.reported_campaign_creator_id AS reported_creator_id,
                 cr.reason                   AS reason,
                 cr.notes                    AS details,
@@ -349,7 +349,7 @@ async def list_campaigns(admin_id: int, search: str = "", status: str = "all",
             SELECT
                 pr.report_id::TEXT, 'profile'::TEXT,
                 pr.reporter_creator_id,
-                NULL::BIGINT, NULL::BIGINT,
+                NULL::BIGINT, NULL::TEXT,
                 pr.reported_profile_creator_id,
                 pr.reason, pr.notes, pr.status, pr.time_reported
             FROM profile_reports pr
@@ -357,7 +357,7 @@ async def list_campaigns(admin_id: int, search: str = "", status: str = "all",
             SELECT
                 mr.report_id::TEXT, 'misc'::TEXT,
                 mr.creator_id           AS reporter_id,
-                NULL::BIGINT, NULL::BIGINT, NULL::TEXT,
+                NULL::BIGINT, NULL::TEXT, NULL::TEXT,
                 mr.report_reason        AS reason,
                 mr.report_description   AS details,
                 mr.status, mr.time_created
@@ -554,7 +554,7 @@ async def list_reports(admin_id: int, db: AsyncSession = Depends(get_db)):
                 'campaign'::TEXT            AS report_type,
                 cr.reporter_creator_id      AS reporter_id,
                 cr.reported_campaign_id     AS campaign_id,
-                NULL::BIGINT                AS comment_id,
+                NULL::TEXT                  AS comment_id,
                 cr.reported_campaign_creator_id AS reported_creator_id,
                 cr.reason                   AS reason,
                 cr.notes                    AS details,
@@ -574,7 +574,7 @@ async def list_reports(admin_id: int, db: AsyncSession = Depends(get_db)):
             SELECT
                 pr.report_id::TEXT, 'profile'::TEXT,
                 pr.reporter_creator_id,
-                NULL::BIGINT, NULL::BIGINT,
+                NULL::BIGINT, NULL::TEXT,
                 pr.reported_profile_creator_id,
                 pr.reason, pr.notes, pr.status, pr.time_reported
             FROM profile_reports pr
@@ -582,7 +582,7 @@ async def list_reports(admin_id: int, db: AsyncSession = Depends(get_db)):
             SELECT
                 mr.report_id::TEXT, 'misc'::TEXT,
                 mr.creator_id           AS reporter_id,
-                NULL::BIGINT, NULL::BIGINT, NULL::TEXT,
+                NULL::BIGINT, NULL::TEXT, NULL::TEXT,
                 mr.report_reason        AS reason,
                 mr.report_description   AS details,
                 mr.status, mr.time_created
@@ -613,8 +613,8 @@ async def list_reports(admin_id: int, db: AsyncSession = Depends(get_db)):
         if has_comment_id:
             # reports table has a comment_id link — show comments that were actually reported
             cc = await db.execute(text(f"""
-                SELECT co.comment_id, co.comment_text, co.creator_id, cr.name AS commenter_name,
-                       co.campaign_id, ca.title AS campaign_title, co.time_created,
+                SELECT co.id AS comment_id, co.content AS comment_text, co.user_id AS creator_id, cr.name AS commenter_name,
+                       co.campaign_id, ca.title AS campaign_title, co.created_at AS time_created,
                        COUNT(r.{id_col}) AS report_count,
                        {reason_expr} AS reasons
                 FROM comments co
@@ -624,7 +624,7 @@ async def list_reports(admin_id: int, db: AsyncSession = Depends(get_db)):
                 'campaign'::TEXT            AS report_type,
                 cr.reporter_creator_id      AS reporter_id,
                 cr.reported_campaign_id     AS campaign_id,
-                NULL::BIGINT                AS comment_id,
+                NULL::TEXT                  AS comment_id,
                 cr.reported_campaign_creator_id AS reported_creator_id,
                 cr.reason                   AS reason,
                 cr.notes                    AS details,
@@ -644,7 +644,7 @@ async def list_reports(admin_id: int, db: AsyncSession = Depends(get_db)):
             SELECT
                 pr.report_id::TEXT, 'profile'::TEXT,
                 pr.reporter_creator_id,
-                NULL::BIGINT, NULL::BIGINT,
+                NULL::BIGINT, NULL::TEXT,
                 pr.reported_profile_creator_id,
                 pr.reason, pr.notes, pr.status, pr.time_reported
             FROM profile_reports pr
@@ -652,17 +652,17 @@ async def list_reports(admin_id: int, db: AsyncSession = Depends(get_db)):
             SELECT
                 mr.report_id::TEXT, 'misc'::TEXT,
                 mr.creator_id           AS reporter_id,
-                NULL::BIGINT, NULL::BIGINT, NULL::TEXT,
+                NULL::BIGINT, NULL::TEXT, NULL::TEXT,
                 mr.report_reason        AS reason,
                 mr.report_description   AS details,
                 mr.status, mr.time_created
             FROM misc_reports mr
-        ) r ON r.comment_id = co.comment_id
-                LEFT JOIN creators cr ON cr.creator_id = co.creator_id
+        ) r ON r.comment_id = co.id
+                LEFT JOIN creators cr ON cr.creator_id = co.user_id
                 LEFT JOIN campaigns ca ON ca.campaign_id = co.campaign_id
-                GROUP BY co.comment_id, co.comment_text, co.creator_id, cr.name,
-                         co.campaign_id, ca.title, co.time_created
-                ORDER BY report_count DESC, co.time_created DESC
+                GROUP BY co.id, co.content, co.user_id, cr.name,
+                         co.campaign_id, ca.title, co.created_at
+                ORDER BY report_count DESC, co.created_at DESC
                 LIMIT 50
             """))
             reported_comments = [{
@@ -678,12 +678,12 @@ async def list_reports(admin_id: int, db: AsyncSession = Depends(get_db)):
         else:
             # Fallback — show recent non-hidden comments as "needs review"
             cc = await db.execute(text("""
-                SELECT co.comment_id, co.comment_text, co.creator_id, cr.name AS commenter_name,
-                       co.campaign_id, ca.title AS campaign_title, co.time_created
+                SELECT co.id AS comment_id, co.content AS comment_text, co.user_id AS creator_id, cr.name AS commenter_name,
+                       co.campaign_id, ca.title AS campaign_title, co.created_at AS time_created
                 FROM comments co
-                LEFT JOIN creators cr ON cr.creator_id = co.creator_id
+                LEFT JOIN creators cr ON cr.creator_id = co.user_id
                 LEFT JOIN campaigns ca ON ca.campaign_id = co.campaign_id
-                ORDER BY co.time_created DESC
+                ORDER BY co.created_at DESC
                 LIMIT 20
             """))
             reported_comments = [{
@@ -707,10 +707,10 @@ async def list_reports(admin_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/comments/{comment_id}/delete")
-async def delete_comment(comment_id: int, admin_id: int,
+async def delete_comment(comment_id: str, admin_id: int,
                          db: AsyncSession = Depends(get_db)):
     await _verify_admin(admin_id, db)
-    await db.execute(text("DELETE FROM comments WHERE comment_id = :c"), {"c": comment_id})
+    await db.execute(text("DELETE FROM comments WHERE id = :c"), {"c": comment_id})
     await _log(db, admin_id, "delete_comment", "comment", str(comment_id))
     await db.commit()
     return {"status": "deleted", "comment_id": comment_id}
@@ -732,13 +732,13 @@ async def list_transactions(admin_id: int, status: str = "all", search: str = ""
     where = "WHERE " + " AND ".join(clauses) if clauses else ""
 
     r = await db.execute(text(f"""
-        SELECT d.donation_id, d.amount, d.status, d.time_created, d.donor_email,
+        SELECT d.id AS donation_id, d.amount, d.status, d.created_at AS time_created, d.donor_email,
                d.is_anonymous, d.stripe_payment_intent_id, d.platform_fee,
                c.title AS campaign_title, c.campaign_id
         FROM donations d
         LEFT JOIN campaigns c ON c.campaign_id = d.campaign_id
         {where}
-        ORDER BY d.time_created DESC
+        ORDER BY d.created_at DESC
         LIMIT :limit OFFSET :offset
     """), params)
     rows = r.mappings().all()
@@ -976,7 +976,7 @@ async def lift_ban(creator_id: str, admin_id: int, db: AsyncSession = Depends(ge
     r = await db.execute(text("""
         DELETE FROM blocked_users
         WHERE creator_id = :cid AND ban_type IN ('soft_ban', 'full_ban')
-        RETURNING ban_id
+        RETURNING block_id
     """), {"cid": creator_id})
     removed = len(r.all())
     await _log(db, admin_id, "lift_ban", "user", creator_id, f"Lifted bans ({removed} rows)")
