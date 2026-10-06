@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from app.site_admin_auth import authenticated_site_admin_id, guard_site_admin_routes
-from app.routes.site_admin import router
+from app.routes.site_admin import router, _log
 from app.database import get_db
 
 
@@ -93,6 +93,14 @@ class SiteAdminAuthorizationTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HTTPException) as caught:
             await guard_site_admin_routes(request(path="/api/site-admin/users/user-x/block"), Database())
         self.assertEqual(caught.exception.status_code, 401)
+
+    async def test_audit_failure_blocks_moderation(self):
+        class FailingDatabase:
+            async def execute(self, *args, **kwargs):
+                raise RuntimeError("Audit table unavailable")
+        with self.assertRaises(HTTPException) as caught:
+            await _log(FailingDatabase(), 7, "approve_campaign", "campaign", "2")
+        self.assertEqual(caught.exception.status_code, 503)
 
 
 class SiteAdminRouterTests(unittest.TestCase):

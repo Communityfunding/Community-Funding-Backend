@@ -38,7 +38,7 @@ async def authenticated_site_admin_id(
         raise HTTPException(status_code=403, detail="Administrator identity linkage is required")
     row = (await db.execute(text(
         "SELECT admin_id FROM public.site_admins "
-        "WHERE clerk_user_id = :subject AND is_active = true"
+        "WHERE clerk_user_id = :subject AND is_active = true AND status = 'approved'"
     ), {"subject": subject})).mappings().first()
     if row is None:
         raise HTTPException(status_code=403, detail="Administrator access required")

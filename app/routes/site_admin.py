@@ -58,29 +58,14 @@ _activity_log_exists: bool | None = None
 
 async def _log(db: AsyncSession, admin_id: int, action: str, target_type: str | None = None,
                target_id: str | None = None, details: str | None = None):
-    """
-    Audit-log a mutating admin action.
-
-    CRITICAL: This MUST never break the outer transaction.
-    Uses a savepoint so INSERT failure doesn't abort the caller's commit,
-    and short-circuits if the admin_activity_log table hasn't been provisioned.
-    """
-    global _activity_log_exists
+    """Record changes atomically; unavailable audit logging must block the action."""
     try:
-        if _activity_log_exists is None:
-            chk = await db.execute(text("SELECT to_regclass('public.admin_activity_log')"))
-            _activity_log_exists = chk.scalar() is not None
-        if not _activity_log_exists:
-            return  # table missing — silently skip logging
-        # Savepoint: if the INSERT fails for any reason, only this nested block rolls back
-        async with db.begin_nested():
-            await db.execute(text("""
-                INSERT INTO admin_activity_log (admin_id, action, target_type, target_id, details)
-                VALUES (:aid, :a, :tt, :ti, :d)
-            """), {"aid": admin_id, "a": action, "tt": target_type, "ti": target_id, "d": details})
+        await db.execute(text("""
+            INSERT INTO admin_activity_log (admin_id, action, target_type, target_id, details)
+            VALUES (:aid, :a, :tt, :ti, :d)
+        """), {"aid": admin_id, "a": action, "tt": target_type, "ti": target_id, "d": details})
     except Exception:
-        # Logging failures must NEVER cascade — the core admin action has already succeeded
-        pass
+        raise HTTPException(status_code=503, detail="Audit logging unavailable; action not committed") from None
 
 
 def _pct(current: float, previous: float) -> float:
@@ -97,21 +82,11 @@ async def register_admin(data: AdminCredentials, db: AsyncSession = Depends(get_
 
 
 @router.post("/login")
-async def login_admin(data: AdminCredentials, db: AsyncSession = Depends(get_db),
+async def login_admin(db: AsyncSession = Depends(get_db),
                       authenticated_id: int = Depends(authenticated_site_admin_id)):
-    r = await db.execute(
-        text("SELECT admin_id, first_name, last_name, is_active FROM site_admins WHERE username = :c"),
-        {"c": data.username},
-    )
-    row = r.mappings().first()
-    if not row:
-        raise HTTPException(status_code=401, detail="Invalid access code")
-    if int(row["admin_id"]) != authenticated_id:
-        raise HTTPException(status_code=403, detail="Administrator identity mismatch")
-    if not row["is_active"]:
-        raise HTTPException(status_code=403, detail="Admin account deactivated")
-    if row["first_name"].lower() != data.first_name.lower() or row["last_name"].lower() != data.last_name.lower():
-        raise HTTPException(status_code=401, detail="Name does not match access code")
+    # Clerk already authenticates the person; access codes and names are not
+    # authentication factors. The server-side grant supplies the identity.
+    row = await _verify_admin(authenticated_id, db)
 
     # Best-effort last_login stamp — column may not exist on legacy-provisioned tables.
     # Isolate in a savepoint so a missing column doesn't abort the login transaction.
