@@ -2,7 +2,7 @@
 import unittest
 import jwt
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from app.database import get_db
@@ -35,6 +35,18 @@ def receipt_db():
 
 
 class FinancialVisibilityTests(unittest.IsolatedAsyncioTestCase):
+    def test_verified_clerk_subject_is_used_for_ledger(self):
+        with patch("jwt_utils.DEV_JWT_BYPASS", False), \
+             patch("jwt_utils.verify_token", return_value={"sub": "verified-clerk-user"}) as verify:
+            self.assertEqual(ledger_v2.verified_ledger_identity("Bearer isolated-token"), "verified-clerk-user")
+        verify.assert_called_once_with("isolated-token")
+
+    def test_development_bypass_cannot_unlock_financial_records(self):
+        with patch("jwt_utils.DEV_JWT_BYPASS", True):
+            with self.assertRaises(HTTPException) as caught:
+                ledger_v2.verified_ledger_identity("Bearer isolated-token")
+        self.assertEqual(caught.exception.status_code, 503)
+
     async def test_public_receipt_id_is_not_authorization(self):
         with self.assertRaises(HTTPException) as caught:
             await donations_v2.get_donation("isolated-uuid", receipt_db(), None, None)
@@ -56,7 +68,7 @@ class FinancialVisibilityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ledger_queries_are_scoped_to_authenticated_identity(self):
         db = SimpleNamespace(execute=AsyncMock(return_value=Result([])))
-        result = await ledger_v2.donor_ledger(db, SimpleNamespace(id="verified-user"))
+        result = await ledger_v2.donor_ledger(db, "verified-user")
         sql, params = db.execute.call_args.args
         self.assertIn("d.donor_id = :uid", str(sql))
         self.assertIn("LOWER(d.status::TEXT)", str(sql))
@@ -71,7 +83,9 @@ class FinancialVisibilityTests(unittest.IsolatedAsyncioTestCase):
         app.include_router(ledger_v2.router)
         app.dependency_overrides[get_db] = fake_db
         wrong_signature = jwt.encode({"sub": "claimed-user"}, "isolated-deliberately-wrong-signing-key", algorithm="HS256")
-        with TestClient(app) as client:
+        with patch("jwt_utils.DEV_JWT_BYPASS", False), \
+             patch("jwt_utils.verify_token", side_effect=ValueError("Invalid signature")), \
+             TestClient(app) as client:
             for path in ("/api/ledger-v2/donor", "/api/ledger-v2/creator"):
                 self.assertEqual(client.get(path).status_code, 401)
                 self.assertEqual(client.get(path, headers={"Authorization": "Bearer forged"}).status_code, 401)

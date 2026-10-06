@@ -4,16 +4,29 @@ from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
-from app.auth import get_current_user
-from app.models.models import User
 
 router = APIRouter(prefix="/api/ledger-v2", tags=["ledger-v2"])
 
 
+def verified_ledger_identity(authorization: Optional[str] = Header(None)) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    import jwt_utils
+    if jwt_utils.DEV_JWT_BYPASS:
+        raise HTTPException(status_code=503, detail="Ledger requires verified authentication")
+    try:
+        claims = jwt_utils.verify_token(authorization[7:])
+        uid = claims.get("sub")
+        if not isinstance(uid, str) or not uid:
+            raise ValueError("Missing identity")
+        return uid
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token") from None
+
+
 @router.get("/donor")
 async def donor_ledger(db: AsyncSession = Depends(get_db),
-                       user: User = Depends(get_current_user)):
-    uid = user.id
+                       uid: str = Depends(verified_ledger_identity)):
     try:
         r = await db.execute(text("""
             SELECT d.id AS donation_id, d.amount, LOWER(d.status::TEXT) AS status, d.created_at AS time_created,
@@ -56,8 +69,7 @@ async def donor_ledger(db: AsyncSession = Depends(get_db),
 
 @router.get("/creator")
 async def creator_ledger(db: AsyncSession = Depends(get_db),
-                         user: User = Depends(get_current_user)):
-    uid = user.id
+                         uid: str = Depends(verified_ledger_identity)):
     try:
         r = await db.execute(text("""
             SELECT d.id AS donation_id, d.amount, LOWER(d.status::TEXT) AS status, d.created_at AS time_created,
