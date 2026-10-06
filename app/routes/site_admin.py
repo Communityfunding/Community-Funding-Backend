@@ -1,12 +1,12 @@
 # v100_tier2_username_rename — site_admins.access_code → username
 # /* v92_cfdb_migration */ reports_view
 """
-Site Admin routes — production-grade platform moderation.
+Site Admin routes — platform moderation with Clerk-linked authorization.
 Separate from per-campaign Business Admin.
 
 Endpoints:
-  POST /api/site-admin/register            — create admin account (8–10 char code)
-  POST /api/site-admin/login               — authenticate with code + name
+  POST /api/site-admin/register            — disabled; no public role grants
+  POST /api/site-admin/login               — verified Clerk identity + existing approved account
   GET  /api/site-admin/dashboard           — overview: stats, growth, chart, top campaigns, recent donations
   GET  /api/site-admin/campaigns           — all campaigns, searchable + filterable
   POST /api/site-admin/campaigns/{id}/delete     — archive + remove
@@ -25,8 +25,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 from pydantic import BaseModel
 from app.database import get_db
+from app.site_admin_auth import authenticated_site_admin_id, guard_site_admin_routes
 
-router = APIRouter(prefix="/api/site-admin", tags=["site-admin"])
+router = APIRouter(prefix="/api/site-admin", tags=["site-admin"],
+                   dependencies=[Depends(guard_site_admin_routes)])
 
 
 # ─── Models ────────────────────────────────────────────────────────────────
@@ -91,24 +93,12 @@ def _pct(current: float, previous: float) -> float:
 
 @router.post("/register")
 async def register_admin(data: AdminCredentials, db: AsyncSession = Depends(get_db)):
-    if len(data.username) < 8 or len(data.username) > 10:
-        raise HTTPException(status_code=400, detail="Access code must be 8–10 characters")
-    existing = await db.execute(
-        text("SELECT admin_id FROM site_admins WHERE username = :c"),
-        {"c": data.username},
-    )
-    if existing.first():
-        raise HTTPException(status_code=409, detail="Access code already in use")
-    await db.execute(
-        text("INSERT INTO site_admins (username, first_name, last_name) VALUES (:c, :fn, :ln)"),
-        {"c": data.username, "fn": data.first_name, "ln": data.last_name},
-    )
-    await db.commit()
-    return {"status": "registered", "message": f"Admin {data.first_name} {data.last_name} registered"}
+    raise HTTPException(status_code=403, detail="Public administrator registration is disabled. Contact the project owner.")
 
 
 @router.post("/login")
-async def login_admin(data: AdminCredentials, db: AsyncSession = Depends(get_db)):
+async def login_admin(data: AdminCredentials, db: AsyncSession = Depends(get_db),
+                      authenticated_id: int = Depends(authenticated_site_admin_id)):
     r = await db.execute(
         text("SELECT admin_id, first_name, last_name, is_active FROM site_admins WHERE username = :c"),
         {"c": data.username},
@@ -116,6 +106,8 @@ async def login_admin(data: AdminCredentials, db: AsyncSession = Depends(get_db)
     row = r.mappings().first()
     if not row:
         raise HTTPException(status_code=401, detail="Invalid access code")
+    if int(row["admin_id"]) != authenticated_id:
+        raise HTTPException(status_code=403, detail="Administrator identity mismatch")
     if not row["is_active"]:
         raise HTTPException(status_code=403, detail="Admin account deactivated")
     if row["first_name"].lower() != data.first_name.lower() or row["last_name"].lower() != data.last_name.lower():
