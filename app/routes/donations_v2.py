@@ -37,6 +37,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, Field, EmailStr
 
 from app.database import get_db
+from app.auth import get_optional_user
+from app.models.models import User
 
 # /* v100_donations_v2 */
 router = APIRouter(prefix="/api/donations-v2", tags=["donations-v2"])
@@ -137,7 +139,7 @@ async def create_checkout_session(
 
     # 5. Build redirect URLs (point to /donation-receipt)
     success_url = data.success_url or (
-        f"{FRONTEND_URL}/donation-receipt?donation_id={donation_id}&campaign_id={data.campaign_id}"
+        f"{FRONTEND_URL}/donation-receipt?donation_id={donation_id}&campaign_id={data.campaign_id}&session_id={{CHECKOUT_SESSION_ID}}"
     )
     cancel_url = data.cancel_url or (
         f"{FRONTEND_URL}/project/{campaign['url'] or data.campaign_id}"
@@ -189,12 +191,15 @@ async def create_checkout_session(
 
 # ─── GET /donation/{id} — receipt page calls this ────────────────────
 @router.get("/donation/{donation_id}")
-async def get_donation(donation_id: str, db: AsyncSession = Depends(get_db)):
+async def get_donation(donation_id: str, db: AsyncSession = Depends(get_db),
+                       session_id: Optional[str] = None,
+                       user: Optional[User] = Depends(get_optional_user)):
     """Fetch a donation by ID for the receipt page."""
     r = await db.execute(text("""
         SELECT d.id AS donation_id, d.amount, LOWER(d.status::TEXT) AS status, d.created_at AS time_created,
                d.donor_name, d.donor_email, d.campaign_id, d.currency,
                d.platform_fee, d.net_amount, d.is_anonymous,
+               d.donor_id, d.stripe_checkout_session_id, c.creator_id,
                c.title AS campaign_title, c.url AS campaign_slug,
                cr.name AS creator_first_name, cr.last_name AS creator_last_name
           FROM donations d
@@ -204,6 +209,10 @@ async def get_donation(donation_id: str, db: AsyncSession = Depends(get_db)):
     """), {"did": donation_id})
     row = r.mappings().first()
     if not row:
+        raise HTTPException(status_code=404, detail="Donation not found")
+    owns_record = bool(user and user.id in (row["donor_id"], row["creator_id"]))
+    has_session = bool(session_id and session_id == row["stripe_checkout_session_id"])
+    if not (owns_record or has_session):
         raise HTTPException(status_code=404, detail="Donation not found")
 
     creator_name = " ".join(filter(None, [row.get("creator_first_name"), row.get("creator_last_name")])) or None
