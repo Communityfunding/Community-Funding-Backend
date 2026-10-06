@@ -1,5 +1,9 @@
 """No network, credentials, real payments or live database changes."""
 import unittest
+import hashlib
+import hmac
+import json
+import time
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -106,4 +110,30 @@ class DonationTests(unittest.IsolatedAsyncioTestCase):
         db = Database([])
         response = await self.webhook(db, paid=False)
         self.assertEqual(response["status"], "awaiting_payment")
+        self.assertEqual(db.queries, [])
+
+    async def test_real_stripe_signature_verifier_accepts_signed_test_event(self):
+        secret = "isolated-test-only-signing-secret"
+        payload = json.dumps({"id": "evt_isolated_qa", "object": "event",
+            "type": "checkout.session.completed", "data": {"object": {
+                "id": "cs_isolated_qa", "payment_intent": "pi_isolated_qa",
+                "payment_status": "paid"}}}).encode()
+        timestamp = int(time.time())
+        digest = hmac.new(secret.encode(), str(timestamp).encode()+b"."+payload, hashlib.sha256).hexdigest()
+        db = Database([{"donation_id": "qa", "campaign_id": 2, "amount": Decimal("1.00")}, None])
+        with patch.object(routes, "WEBHOOK_SECRET", secret):
+            response = await routes.stripe_webhook(
+                SimpleNamespace(body=AsyncMock(return_value=payload)),
+                f"t={timestamp},v1={digest}", db)
+        self.assertEqual(response["status"], "succeeded")
+        self.assertEqual(db.queries[1][1]["cents"], 100)
+
+    async def test_real_stripe_signature_verifier_rejects_forged_event(self):
+        db = Database([])
+        with patch.object(routes, "WEBHOOK_SECRET", "isolated-secret"):
+            with self.assertRaises(HTTPException) as caught:
+                await routes.stripe_webhook(
+                    SimpleNamespace(body=AsyncMock(return_value=b'{}')),
+                    f"t={int(time.time())},v1=forged", db)
+        self.assertEqual(caught.exception.status_code, 400)
         self.assertEqual(db.queries, [])
