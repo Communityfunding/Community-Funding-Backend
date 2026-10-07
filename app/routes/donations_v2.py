@@ -272,6 +272,18 @@ async def stripe_webhook(
         """), {"sid": session_id, "pi": payment_intent_id})
         donation = r.mappings().first()
         if not donation:
+            from app import donation_receipts
+            if donation_receipts.enabled():
+                existing = await db.execute(text("""
+                    SELECT id FROM donations
+                    WHERE stripe_checkout_session_id=:sid AND status='SUCCEEDED'
+                """), {"sid": session_id})
+                existing = existing.mappings().first()
+                if existing:
+                    try:
+                        await donation_receipts.deliver_receipt(db, existing["id"])
+                    except Exception:
+                        raise HTTPException(status_code=503, detail="Payment recorded; confirmation email retry required") from None
             return {"received": True, "status": "already_processed_or_unknown"}
 
         # Bump campaign totals (amount_raised_cents and backers count)
@@ -283,7 +295,17 @@ async def stripe_webhook(
              WHERE campaign_id = :cid
         """), {"cents": amount_cents, "cid": donation["campaign_id"]})
 
+        from app import donation_receipts
+        if donation_receipts.enabled():
+            await donation_receipts.enqueue_receipt(db, donation["donation_id"])
         await db.commit()
+        if donation_receipts.enabled():
+            try:
+                await donation_receipts.deliver_receipt(db, donation["donation_id"])
+            except Exception:
+                # Payment is already durable. Stripe retries the signed event;
+                # the duplicate branch retries email without incrementing totals.
+                raise HTTPException(status_code=503, detail="Payment recorded; confirmation email retry required") from None
         return {"received": True, "donation_id": donation["donation_id"], "status": "succeeded"}
 
     elif event["type"] == "checkout.session.expired":

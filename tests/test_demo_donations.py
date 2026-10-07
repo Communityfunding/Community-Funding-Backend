@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi import HTTPException
 from pydantic import ValidationError
 from app.routes import donations_v2 as routes
+from app import donation_receipts
 
 
 class Result:
@@ -44,6 +45,23 @@ CAMPAIGN = {"campaign_id": 2, "title": "Isolated QA", "status": "active",
 
 
 class DonationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_email_failure_preserves_paid_commit_and_duplicate_retries_email_only(self):
+        db = Database([{"donation_id":"qa","campaign_id":2,"amount":Decimal("1.00")},None])
+        with patch.object(donation_receipts,"enabled",return_value=True), \
+             patch.object(donation_receipts,"enqueue_receipt",new=AsyncMock()) as enqueue, \
+             patch.object(donation_receipts,"deliver_receipt",new=AsyncMock(side_effect=RuntimeError("provider"))):
+            with self.assertRaises(HTTPException) as caught:
+                await self.webhook(db)
+        self.assertEqual(caught.exception.status_code,503)
+        db.commit.assert_awaited_once()
+        enqueue.assert_awaited_once_with(db,"qa")
+        retry = Database([None,{"id":"qa"}])
+        with patch.object(donation_receipts,"enabled",return_value=True), \
+             patch.object(donation_receipts,"deliver_receipt",new=AsyncMock(return_value="accepted")) as deliver:
+            await self.webhook(retry)
+        deliver.assert_awaited_once_with(retry,"qa")
+        self.assertNotIn("UPDATE campaigns", " ".join(q[0] for q in retry.queries))
+
     async def test_guest_checkout_uses_uuid_nullable_donor_and_integer_cents(self):
         db = Database([CAMPAIGN, "qa-uuid", None])
         with patch.object(routes.stripe, "api_key", "sk_test_fake"), \
