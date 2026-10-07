@@ -474,31 +474,9 @@ async def get_campaign_page(
         can_comment = bool(campaign.get("status") == "active" and can_view_campaign)
 
         if not can_view_campaign:
-            return {
-                "campaign": campaign,
-                "creator": creator,
-                "collaborators": [],
-                "faqs": [],
-                "rewards": [],
-                "photos": [],
-                "comments": [],
-                "comments_pagination": {
-                    "page": 1,
-                    "per_page": COMMENTS_PER_PAGE,
-                    "total_parent_comments": 0,
-                    "total_pages": 1,
-                },
-                "viewer_permissions": {
-                    "is_owner": is_owner,
-                    "is_collaborator": is_collaborator,
-                    "has_pending_invite": has_pending_invite,
-                    "can_view": False,
-                    "can_comment": False,
-                },
-                "viewer_engagement": {
-                    "is_saved": is_saved,
-                },
-            }
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        if creator and not is_owner:
+            creator.pop("email", None)
         faqs = [
             dict(f)
             for f in await conn.fetch(

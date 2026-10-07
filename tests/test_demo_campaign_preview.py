@@ -3,11 +3,29 @@ import unittest
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+from fastapi import HTTPException
 
 from app.routes import campaign_page
 
 
 class PreviewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_private_campaign_is_not_exposed_to_anonymous_viewer(self):
+        connection = SimpleNamespace(fetchrow=AsyncMock(return_value={"email": "private@example.com"}))
+
+        @asynccontextmanager
+        async def acquire():
+            yield connection
+
+        with patch.object(campaign_page,"_get_campaign_by_url_or_id",new=AsyncMock(return_value={
+                "campaign_id":99,"creator_id":"qa","status":"suspended","description_html":"PRIVATE"})), \
+             patch.object(campaign_page,"get_pool",new=AsyncMock(return_value=SimpleNamespace(acquire=acquire))), \
+             patch.object(campaign_page,"_get_campaign_collaborators",new=AsyncMock(return_value=[])), \
+             patch.object(campaign_page,"_get_viewer_collaborator_status",new=AsyncMock(return_value=(False,False))), \
+             patch.object(campaign_page,"_get_viewer_saved_status",new=AsyncMock(return_value=False)):
+            with self.assertRaises(HTTPException) as caught:
+                await campaign_page.get_campaign_page("qa",page=1,sort_by="newest",current_user=None)
+        self.assertEqual(caught.exception.status_code,404)
+
     async def test_flat_comments_render_readonly_and_keep_saved_status(self):
         connection = SimpleNamespace(
             fetchrow=AsyncMock(return_value={"creator_id": "qa", "name": "QA"}),
