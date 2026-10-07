@@ -831,7 +831,7 @@ async def list_pending_campaigns(admin_id: int, db: AsyncSession = Depends(get_d
     await _verify_admin(admin_id, db)
     r = await db.execute(text("""
         SELECT c.campaign_id, c.title,
-               COALESCE(c.description, '') AS description,
+               COALESCE(c.description_html, '') AS description,
                c.category, c.location,
                c.funding_goal_cents, c.status, c.creator_id, c.time_created,
                cr.name AS creator_name, cr.email AS creator_email

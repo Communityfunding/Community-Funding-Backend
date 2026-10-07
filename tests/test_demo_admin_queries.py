@@ -35,6 +35,20 @@ class Database:
 
 
 class AdminQueryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pending_queue_uses_canonical_description(self):
+        db = Database([[{
+            "campaign_id": 99, "title": "Isolated QA", "description": "Sandbox only",
+            "category": "Art", "location": "Test", "funding_goal_cents": 10000,
+            "creator_id": "qa", "creator_name": "QA", "creator_email": None,
+            "time_created": None,
+        }]])
+        with patch.object(site_admin, "_verify_admin", new=AsyncMock()):
+            response = await site_admin.list_pending_campaigns(1, db)
+        self.assertIn("c.description_html", db.queries[0][0])
+        self.assertNotIn("c.description,", db.queries[0][0])
+        self.assertEqual(response["count"], 1)
+        self.assertEqual(response["pending"][0]["funding_goal"], 100)
+
     async def test_transaction_query_uses_real_columns_and_normalizes_enum(self):
         db = Database([[], 0, {"total": 0, "fees": 0, "count": 0}])
         with patch.object(site_admin, "_verify_admin", new=AsyncMock()):
