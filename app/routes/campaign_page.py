@@ -509,6 +509,45 @@ async def get_campaign_page(
 
         friend_ids = await _get_friend_ids_for_user(conn, viewer_id)
 
+        # The demo uses the canonical ORM's flat UUID comments, not the legacy
+        # threaded-comment schema. Preserve real content; do not synthesize likes
+        # or enable legacy write endpoints against incompatible columns.
+        uses_flat_comments = await conn.fetchval("""
+            SELECT EXISTS (SELECT 1 FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='comments' AND column_name='id')
+        """)
+        if uses_flat_comments:
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM comments WHERE campaign_id=$1 AND NOT COALESCE(is_hidden,false)", cid)
+            pages = max(1, ceil(count / COMMENTS_PER_PAGE))
+            current_page = min(page, pages)
+            direction = "ASC" if sort_by == "oldest" else "DESC"
+            rows = await conn.fetch(f"""
+                SELECT c.id AS comment_id, c.content AS comment_text,
+                       c.user_id AS creator_id, c.campaign_id,
+                       c.created_at AS time_created, NULL::timestamptz AS updated_at,
+                       COALESCE(NULLIF(cr.username,''),cr.creator_id) AS username,
+                       cr.name, cr.last_name, cr.avatar_url, cr.user_type,
+                       NULL::text AS parent_comment_id, NULL::text AS reply_to_comment_id,
+                       NULL::text AS reply_to_name, 0 AS like_count, false AS liked_by_viewer
+                FROM comments c LEFT JOIN creators cr ON cr.creator_id=c.user_id
+                WHERE c.campaign_id=$1 AND NOT COALESCE(c.is_hidden,false)
+                ORDER BY c.created_at {direction}, c.id {direction} LIMIT $2 OFFSET $3
+            """, cid, COMMENTS_PER_PAGE, (current_page-1)*COMMENTS_PER_PAGE)
+            comments = [dict(_decorate_comment(dict(row), viewer_id, friend_ids,
+                        campaign_owner_id, collaborator_ids), replies=[],
+                        reply_count=0, has_more_replies=False) for row in rows]
+            return {
+                "campaign": campaign, "creator": creator, "collaborators": collaborators,
+                "faqs": faqs, "rewards": rewards, "photos": photos, "comments": comments,
+                "comments_pagination": {"page": current_page, "per_page": COMMENTS_PER_PAGE,
+                    "total_parent_comments": count, "total_pages": pages},
+                "viewer_permissions": {"is_owner": is_owner, "is_collaborator": is_collaborator,
+                    "has_pending_invite": has_pending_invite, "can_view": can_view_campaign,
+                    "can_comment": False},
+                "viewer_engagement": {"is_saved": is_saved},
+            }
+
         total_parent_comments = await conn.fetchval(
             """
             SELECT COUNT(*)
