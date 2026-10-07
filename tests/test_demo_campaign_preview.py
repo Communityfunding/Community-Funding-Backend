@@ -34,6 +34,7 @@ class PreviewTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["viewer_permissions"]["can_view"])
         self.assertFalse(result["viewer_permissions"]["can_comment"])
+        self.assertFalse(result["viewer_permissions"]["supports_comment_threads"])
         self.assertTrue(result["viewer_engagement"]["is_saved"])
         self.assertEqual(result["comments"][0]["comment_text"], "Actual content")
         sql = connection.fetch.call_args.args[0]

@@ -1,6 +1,7 @@
 from datetime import timedelta
 from math import ceil
 import re
+from uuid import uuid4
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -235,6 +236,38 @@ async def _get_viewer_saved_status(conn, campaign_id: int, viewer_id: str | None
         campaign_id,
     )
     return bool(saved)
+
+
+async def _uses_flat_comments(conn) -> bool:
+    return bool(await conn.fetchval("""
+        SELECT EXISTS (SELECT 1 FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='comments' AND column_name='id')
+    """))
+
+
+async def _require_comment_permission(conn, creator_id: str):
+    blocked = await conn.fetchval("""
+        SELECT EXISTS(SELECT 1 FROM blocked_users WHERE creator_id=$1
+                      AND ban_type IN ('soft_ban','full_ban'))
+    """, creator_id)
+    if blocked:
+        raise HTTPException(status_code=403, detail="Commenting is restricted for this account")
+
+
+async def _flat_comment_payload(conn, comment_id: str, viewer_id: str, owner_id: str):
+    row = await conn.fetchrow("""
+        SELECT c.id AS comment_id, c.content AS comment_text, c.user_id AS creator_id,
+               c.campaign_id, c.created_at AS time_created, NULL::timestamptz AS updated_at,
+               cr.username, cr.name, cr.last_name, cr.avatar_url, cr.user_type,
+               NULL::text AS parent_comment_id, NULL::text AS reply_to_comment_id,
+               NULL::text AS reply_to_name, 0 AS like_count, false AS liked_by_viewer
+        FROM comments c JOIN creators cr ON cr.creator_id=c.user_id
+        WHERE c.id=$1 AND NOT COALESCE(c.is_hidden,false)
+    """, comment_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Comment not found")
+    return dict(_decorate_comment(dict(row), viewer_id, set(), owner_id, set()),
+                replies=[], reply_count=0, has_more_replies=False)
 
 def _contains_foul_language(text: str) -> bool:
     normalized = re.sub(r"[^a-zA-Z0-9\s]", " ", text.lower())
@@ -544,7 +577,7 @@ async def get_campaign_page(
                     "total_parent_comments": count, "total_pages": pages},
                 "viewer_permissions": {"is_owner": is_owner, "is_collaborator": is_collaborator,
                     "has_pending_invite": has_pending_invite, "can_view": can_view_campaign,
-                    "can_comment": False},
+                    "can_comment": can_comment, "supports_comment_threads": False},
                 "viewer_engagement": {"is_saved": is_saved},
             }
 
@@ -831,11 +864,25 @@ async def create_comment(
         raise HTTPException(status_code=404, detail="Campaign not found")
 
     comment_text = _validate_comment_text(payload.comment_text)
+    if campaign.get("status") != "active":
+        raise HTTPException(status_code=400, detail="Comments require an active campaign")
     pool = await get_pool()
 
     async with pool.acquire() as conn:
         parent_comment_id = payload.parent_comment_id
         reply_to_comment_id = payload.reply_to_comment_id
+
+        if await _uses_flat_comments(conn):
+            if parent_comment_id is not None or reply_to_comment_id is not None:
+                raise HTTPException(status_code=400, detail="Threaded replies are not available")
+            await _require_comment_permission(conn, current_user.id)
+            comment_id = str(uuid4())
+            await conn.execute("""
+                INSERT INTO comments(id,campaign_id,user_id,content,is_hidden)
+                VALUES($1,$2,$3,$4,false)
+            """, comment_id, campaign["campaign_id"], current_user.id, comment_text)
+            return {"comment": await _flat_comment_payload(
+                conn, comment_id, current_user.id, campaign["creator_id"])}
 
         if parent_comment_id is not None:
             parent_comment = await conn.fetchrow(
@@ -904,7 +951,7 @@ async def create_comment(
 @router.patch("/{campaign_url}/comments/{comment_id}")
 async def update_comment(
     campaign_url: str,
-    comment_id: int,
+    comment_id: str,
     payload: UpdateCommentRequest,
     current_user: User = Depends(get_current_user),
 ):
@@ -916,6 +963,21 @@ async def update_comment(
     pool = await get_pool()
 
     async with pool.acquire() as conn:
+        if await _uses_flat_comments(conn):
+            await _require_comment_permission(conn, current_user.id)
+            row = await conn.fetchrow("""
+                UPDATE comments SET content=$4
+                WHERE id=$1 AND campaign_id=$2 AND user_id=$3
+                  AND NOT COALESCE(is_hidden,false) RETURNING id
+            """, comment_id, campaign["campaign_id"], current_user.id, comment_text)
+            if not row:
+                raise HTTPException(status_code=404, detail="Comment not found or not yours")
+            return {"comment": await _flat_comment_payload(
+                conn, comment_id, current_user.id, campaign["creator_id"])}
+        try:
+            comment_id = int(comment_id)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Comment not found") from None
         existing = await conn.fetchrow(
             """
             SELECT comment_id, creator_id, campaign_id
@@ -1276,7 +1338,7 @@ async def report_comment(
 @router.delete("/{campaign_url}/comments/{comment_id}")
 async def delete_comment(
     campaign_url: str,
-    comment_id: int,
+    comment_id: str,
     current_user: User = Depends(get_current_user),
 ):
     campaign = await _get_campaign_by_url_or_id(campaign_url)
@@ -1285,6 +1347,19 @@ async def delete_comment(
 
     pool = await get_pool()
     async with pool.acquire() as conn:
+        if await _uses_flat_comments(conn):
+            row = await conn.fetchrow("""
+                UPDATE comments SET is_hidden=true
+                WHERE id=$1 AND campaign_id=$2 AND user_id=$3
+                  AND NOT COALESCE(is_hidden,false) RETURNING id
+            """, comment_id, campaign["campaign_id"], current_user.id)
+            if not row:
+                raise HTTPException(status_code=404, detail="Comment not found or not yours")
+            return {"ok": True, "comment_id": comment_id}
+        try:
+            comment_id = int(comment_id)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Comment not found") from None
         comment = await conn.fetchrow(
             """
             SELECT comment_id, creator_id, campaign_id, parent_comment_id
