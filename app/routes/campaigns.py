@@ -692,10 +692,13 @@ async def get_draft(campaign_id: int, user: User = Depends(get_current_user)):
 # ── Finalize from create-project wizard ─────────────────────────────────────
 
 @router.post("/finalize")
-async def finalize_campaign(data: dict):
+async def finalize_campaign(data: dict, user: User = Depends(get_current_user)):
     """
     Submit create-project draft and write campaigns/faqs/rewards/collaborators.
     """
+    if data.get("creator_id") and data["creator_id"] != user.id:
+        raise HTTPException(status_code=403, detail="Not your campaign")
+    data = {**data, "creator_id": user.id}
     try:
         return await db_mod.finalize_campaign(data)
     except ValueError as e:
@@ -795,7 +798,7 @@ async def publish_campaign(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Publish a draft campaign (makes it active and accepting donations)."""
+    """Direct creator publication is disabled; all campaigns need review."""
     result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
     campaign = result.scalar_one_or_none()
     if not campaign:
@@ -805,9 +808,7 @@ async def publish_campaign(
     if campaign.status != "draft":
         raise HTTPException(status_code=400, detail="Only draft campaigns can be published")
 
-    campaign.status = "active"
-    await db.flush()
-    return build_campaign_response(campaign, creator_name=user.name)
+    raise HTTPException(status_code=409, detail="Submit this campaign for administrator review through the campaign creation workflow.")
 
 
 # ── Cancel ─────────────────────────────────────────────────────────────────

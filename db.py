@@ -458,7 +458,7 @@ async def finalize_campaign(data: dict[str, Any]) -> dict[str, Any]:
                     SET title = $1, status = 'pending_review', url = $2,
                         description_html = $3, category = $4, "location" = $5,
                         funding_goal_cents = $6, duration_days = $7, end_date = $8, bio = $9
-                    WHERE campaign_id = $10 AND creator_id = $11
+                    WHERE campaign_id = $10 AND creator_id = $11 AND status IN ('draft', 'rejected')
                     RETURNING campaign_id, url
                     """,
                     title, url, description, category, location,
