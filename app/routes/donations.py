@@ -27,7 +27,7 @@ async def get_my_backed_campaigns(current_user: User = Depends(get_current_user)
                 c.duration_days,
                 c.amount_raised_cents,
                 c.backers,
-                d.time_created AS backed_at,
+                d.created_at AS backed_at,
                 creator.creator_id AS creator_creator_id,
                 COALESCE(NULLIF(creator.username, ''), creator.creator_id) AS creator_username,
                 creator.name AS creator_name,
@@ -38,8 +38,8 @@ async def get_my_backed_campaigns(current_user: User = Depends(get_current_user)
               ON c.campaign_id = d.campaign_id
             LEFT JOIN creators creator
               ON creator.creator_id = c.creator_id
-            WHERE d.donor_creator_id = $1
-            ORDER BY c.campaign_id, d.time_created DESC
+            WHERE d.donor_id = $1 AND LOWER(d.status::TEXT) = 'succeeded'
+            ORDER BY c.campaign_id, d.created_at DESC
             """,
             current_user.id,
         )

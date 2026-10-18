@@ -2,7 +2,7 @@
 Auth routes — register, login, profile, password change
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text
 from pydantic import BaseModel
@@ -57,7 +57,7 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.email == data.email))
     user = result.scalar_one_or_none()
 
-    if not user or not verify_password(data.password, user.hashed_password):
+    if not user or str(user.id).startswith("user_") or not user.hashed_password or not verify_password(data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     token = create_access_token(user.id)
@@ -180,9 +180,21 @@ async def _repoint_foreign_keys_to_creator_id(
 
 
 @router.post("/clerk-sync")
-async def clerk_sync(data: ClerkSyncRequest, db: AsyncSession = Depends(get_db)):
+async def clerk_sync(data: ClerkSyncRequest, db: AsyncSession = Depends(get_db),
+                     authorization: Optional[str] = Header(None)):
     """Bridge Clerk frontend auth → backend JWT. Creates user if needed."""
     import traceback
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Verified Clerk session required")
+    import jwt_utils
+    if jwt_utils.DEV_JWT_BYPASS:
+        raise HTTPException(status_code=503, detail="Session bridge requires verified authentication")
+    try:
+        claims = jwt_utils.verify_token(authorization[7:])
+        if not claims or claims.get("sub") != data.clerk_id:
+            raise ValueError("Identity mismatch")
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid Clerk identity") from None
 
     try:
         print(
@@ -202,6 +214,8 @@ async def clerk_sync(data: ClerkSyncRequest, db: AsyncSession = Depends(get_db))
             print(f"[clerk-sync] lookup by email: {'found id=' + str(user.id) if user else 'not found'}")
 
             if user:
+                if user.id != data.clerk_id:
+                    raise HTTPException(status_code=409, detail="This email already belongs to another account. Verified account linking is required.")
                 old_id = user.id
                 if old_id != data.clerk_id:
                     clash = await db.execute(
@@ -247,7 +261,7 @@ async def clerk_sync(data: ClerkSyncRequest, db: AsyncSession = Depends(get_db))
                     id=data.clerk_id,
                     email=data.email,
                     name=data.name,
-                    hashed_password=hash_password(f"clerk_synced_{data.email or data.clerk_id}"),
+                    hashed_password=None,
                     user_type=1,
                 )
                 db.add(user)
