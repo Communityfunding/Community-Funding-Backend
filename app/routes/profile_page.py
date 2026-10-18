@@ -105,9 +105,11 @@ async def get_profile_page(creator_id_or_username: str, current_user: User | Non
                 LIMIT 1
             ) cp ON true
             WHERE c.creator_id = $1
+              AND ($2::bool OR c.status IN ('active', 'inactive'))
             ORDER BY c.time_created DESC, c.campaign_id DESC
             """,
             creator_id,
+            viewer_is_self,
         )
         campaigns = [dict(c) for c in campaigns]
         for campaign in campaigns:
@@ -179,9 +181,9 @@ async def get_profile_page(creator_id_or_username: str, current_user: User | Non
             FROM (
                 SELECT
                     'commented'::text AS activity_type,
-                    c.time_created AS activity_time,
-                    c.comment_id,
-                    c.comment_text AS activity_text,
+                    c.created_at AS activity_time,
+                    c.id AS comment_id,
+                    c.content AS activity_text,
                     camp.campaign_id,
                     camp.url AS campaign_url,
                     camp.title AS campaign_title,
@@ -193,14 +195,14 @@ async def get_profile_page(creator_id_or_username: str, current_user: User | Non
                 FROM comments c
                 JOIN campaigns camp
                   ON camp.campaign_id = c.campaign_id
-                WHERE c.creator_id = $1
+                WHERE c.user_id = $1
 
                 UNION ALL
 
                 SELECT
                     'followed'::text AS activity_type,
                     cf.time_created AS activity_time,
-                    NULL::bigint AS comment_id,
+                    NULL::text AS comment_id,
                     NULL::text AS activity_text,
                     NULL::bigint AS campaign_id,
                     NULL::text AS campaign_url,
@@ -220,7 +222,7 @@ async def get_profile_page(creator_id_or_username: str, current_user: User | Non
                 SELECT
                     'joined_as_collaborator'::text AS activity_type,
                     coll.time_created AS activity_time,
-                    NULL::bigint AS comment_id,
+                    NULL::text AS comment_id,
                     NULL::text AS activity_text,
                     camp.campaign_id,
                     camp.url AS campaign_url,
@@ -241,7 +243,7 @@ async def get_profile_page(creator_id_or_username: str, current_user: User | Non
                 SELECT
                     'created_campaign'::text AS activity_type,
                     camp.time_created AS activity_time,
-                    NULL::bigint AS comment_id,
+                    NULL::text AS comment_id,
                     NULL::text AS activity_text,
                     camp.campaign_id,
                     camp.url AS campaign_url,
@@ -254,11 +256,13 @@ async def get_profile_page(creator_id_or_username: str, current_user: User | Non
                 FROM campaigns camp
                 WHERE camp.creator_id = $1
             ) activity
+            WHERE $3::bool OR campaign_status IS NULL OR campaign_status IN ('active', 'inactive')
             ORDER BY activity_time DESC
             LIMIT 10
             """,
             creator_id,
             creator_email,
+            viewer_is_self,
         )
 
         activities = []
@@ -267,6 +271,8 @@ async def get_profile_page(creator_id_or_username: str, current_user: User | Non
             item["activity_text_preview"] = item["activity_text"][:180] if item.get("activity_text") else None
             activities.append(item)
 
+    if not viewer_is_self:
+        creator.pop("email", None)
     return {
         "creator": creator,
         "interests": interests,

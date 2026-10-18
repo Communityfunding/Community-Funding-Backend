@@ -8,26 +8,28 @@ from app.database import get_db
 router = APIRouter(prefix="/api/ledger-v2", tags=["ledger-v2"])
 
 
-def _extract_user_id(authorization: Optional[str]) -> Optional[str]:
+def verified_ledger_identity(authorization: Optional[str] = Header(None)) -> str:
     if not authorization or not authorization.startswith("Bearer "):
-        return None
-    token = authorization[7:]
+        raise HTTPException(status_code=401, detail="Authentication required")
+    import jwt_utils
+    if jwt_utils.DEV_JWT_BYPASS:
+        raise HTTPException(status_code=503, detail="Ledger requires verified authentication")
     try:
-        import jwt as pyjwt
-        return pyjwt.decode(token, options={"verify_signature": False}).get("sub")
+        claims = jwt_utils.verify_token(authorization[7:])
+        uid = claims.get("sub")
+        if not isinstance(uid, str) or not uid:
+            raise ValueError("Missing identity")
+        return uid
     except Exception:
-        return None
+        raise HTTPException(status_code=401, detail="Invalid or expired token") from None
 
 
 @router.get("/donor")
 async def donor_ledger(db: AsyncSession = Depends(get_db),
-                       authorization: Optional[str] = Header(None)):
-    uid = _extract_user_id(authorization)
-    if not uid:
-        raise HTTPException(status_code=401, detail="Authentication required")
+                       uid: str = Depends(verified_ledger_identity)):
     try:
         r = await db.execute(text("""
-            SELECT d.donation_id, d.amount, d.status, d.time_created,
+            SELECT d.id AS donation_id, d.amount, LOWER(d.status::TEXT) AS status, d.created_at AS time_created,
                    d.campaign_id,
                    COALESCE(d.donor_name, 'Anonymous') AS donor_name,
                    COALESCE(d.is_anonymous, FALSE)     AS is_anonymous,
@@ -38,12 +40,12 @@ async def donor_ledger(db: AsyncSession = Depends(get_db),
               FROM donations d
               JOIN campaigns c  ON c.campaign_id = d.campaign_id
          LEFT JOIN creators cr ON cr.creator_id = c.creator_id
-             WHERE d.donor_creator_id = :uid
-             ORDER BY d.time_created DESC
+             WHERE d.donor_id = :uid
+             ORDER BY d.created_at DESC
              LIMIT 200
         """), {"uid": uid})
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ledger query failed: {e}")
+        raise HTTPException(status_code=500, detail="Ledger temporarily unavailable") from None
 
     out, total = [], 0.0
     for row in r.mappings().all():
@@ -67,13 +69,10 @@ async def donor_ledger(db: AsyncSession = Depends(get_db),
 
 @router.get("/creator")
 async def creator_ledger(db: AsyncSession = Depends(get_db),
-                         authorization: Optional[str] = Header(None)):
-    uid = _extract_user_id(authorization)
-    if not uid:
-        raise HTTPException(status_code=401, detail="Authentication required")
+                         uid: str = Depends(verified_ledger_identity)):
     try:
         r = await db.execute(text("""
-            SELECT d.donation_id, d.amount, d.status, d.time_created,
+            SELECT d.id AS donation_id, d.amount, LOWER(d.status::TEXT) AS status, d.created_at AS time_created,
                    COALESCE(d.donor_name, 'Anonymous') AS donor_name,
                    COALESCE(d.is_anonymous, FALSE)     AS is_anonymous,
                    COALESCE(d.message, '')             AS message,
@@ -81,11 +80,11 @@ async def creator_ledger(db: AsyncSession = Depends(get_db),
               FROM donations d
               JOIN campaigns c ON c.campaign_id = d.campaign_id
              WHERE c.creator_id = :uid
-             ORDER BY d.time_created DESC
+             ORDER BY d.created_at DESC
              LIMIT 200
         """), {"uid": uid})
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Creator ledger query failed: {e}")
+        raise HTTPException(status_code=500, detail="Creator ledger temporarily unavailable") from None
 
     out, total = [], 0.0
     for row in r.mappings().all():
@@ -110,14 +109,15 @@ async def creator_ledger(db: AsyncSession = Depends(get_db),
 @router.get("/campaign/{campaign_id}/donors")
 async def campaign_donors(campaign_id: int, db: AsyncSession = Depends(get_db)):
     r = await db.execute(text("""
-        SELECT donation_id, amount, time_created,
-               COALESCE(donor_name, 'Anonymous') AS donor_name,
-               COALESCE(is_anonymous, FALSE)     AS is_anonymous,
-               COALESCE(message, '')             AS message,
-               status
-          FROM donations
-         WHERE campaign_id = :cid AND status = 'succeeded'
-         ORDER BY time_created DESC
+        SELECT d.id AS donation_id, d.amount, d.created_at AS time_created,
+               COALESCE(d.donor_name, 'Anonymous') AS donor_name,
+               COALESCE(d.is_anonymous, FALSE)     AS is_anonymous,
+               COALESCE(d.message, '')             AS message,
+               LOWER(d.status::TEXT) AS status
+          FROM donations d JOIN campaigns c ON c.campaign_id = d.campaign_id
+         WHERE d.campaign_id = :cid AND LOWER(d.status::TEXT) = 'succeeded'
+           AND c.status IN ('active', 'inactive')
+         ORDER BY d.created_at DESC
          LIMIT 100
     """), {"cid": campaign_id})
     return {"donors": [

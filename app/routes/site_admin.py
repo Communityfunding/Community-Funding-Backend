@@ -1,12 +1,12 @@
 # v100_tier2_username_rename — site_admins.access_code → username
 # /* v92_cfdb_migration */ reports_view
 """
-Site Admin routes — production-grade platform moderation.
+Site Admin routes — platform moderation with Clerk-linked authorization.
 Separate from per-campaign Business Admin.
 
 Endpoints:
-  POST /api/site-admin/register            — create admin account (8–10 char code)
-  POST /api/site-admin/login               — authenticate with code + name
+  POST /api/site-admin/register            — disabled; no public role grants
+  POST /api/site-admin/login               — verified Clerk identity + existing approved account
   GET  /api/site-admin/dashboard           — overview: stats, growth, chart, top campaigns, recent donations
   GET  /api/site-admin/campaigns           — all campaigns, searchable + filterable
   POST /api/site-admin/campaigns/{id}/delete     — archive + remove
@@ -25,8 +25,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 from pydantic import BaseModel
 from app.database import get_db
+from app.site_admin_auth import authenticated_site_admin_id, guard_site_admin_routes
 
-router = APIRouter(prefix="/api/site-admin", tags=["site-admin"])
+router = APIRouter(prefix="/api/site-admin", tags=["site-admin"],
+                   dependencies=[Depends(guard_site_admin_routes)])
 
 
 # ─── Models ────────────────────────────────────────────────────────────────
@@ -56,29 +58,14 @@ _activity_log_exists: bool | None = None
 
 async def _log(db: AsyncSession, admin_id: int, action: str, target_type: str | None = None,
                target_id: str | None = None, details: str | None = None):
-    """
-    Audit-log a mutating admin action.
-
-    CRITICAL: This MUST never break the outer transaction.
-    Uses a savepoint so INSERT failure doesn't abort the caller's commit,
-    and short-circuits if the admin_activity_log table hasn't been provisioned.
-    """
-    global _activity_log_exists
+    """Record changes atomically; unavailable audit logging must block the action."""
     try:
-        if _activity_log_exists is None:
-            chk = await db.execute(text("SELECT to_regclass('public.admin_activity_log')"))
-            _activity_log_exists = chk.scalar() is not None
-        if not _activity_log_exists:
-            return  # table missing — silently skip logging
-        # Savepoint: if the INSERT fails for any reason, only this nested block rolls back
-        async with db.begin_nested():
-            await db.execute(text("""
-                INSERT INTO admin_activity_log (admin_id, action, target_type, target_id, details)
-                VALUES (:aid, :a, :tt, :ti, :d)
-            """), {"aid": admin_id, "a": action, "tt": target_type, "ti": target_id, "d": details})
+        await db.execute(text("""
+            INSERT INTO admin_activity_log (admin_id, action, target_type, target_id, details)
+            VALUES (:aid, :a, :tt, :ti, :d)
+        """), {"aid": admin_id, "a": action, "tt": target_type, "ti": target_id, "d": details})
     except Exception:
-        # Logging failures must NEVER cascade — the core admin action has already succeeded
-        pass
+        raise HTTPException(status_code=503, detail="Audit logging unavailable; action not committed") from None
 
 
 def _pct(current: float, previous: float) -> float:
@@ -91,35 +78,15 @@ def _pct(current: float, previous: float) -> float:
 
 @router.post("/register")
 async def register_admin(data: AdminCredentials, db: AsyncSession = Depends(get_db)):
-    if len(data.username) < 8 or len(data.username) > 10:
-        raise HTTPException(status_code=400, detail="Access code must be 8–10 characters")
-    existing = await db.execute(
-        text("SELECT admin_id FROM site_admins WHERE username = :c"),
-        {"c": data.username},
-    )
-    if existing.first():
-        raise HTTPException(status_code=409, detail="Access code already in use")
-    await db.execute(
-        text("INSERT INTO site_admins (username, first_name, last_name) VALUES (:c, :fn, :ln)"),
-        {"c": data.username, "fn": data.first_name, "ln": data.last_name},
-    )
-    await db.commit()
-    return {"status": "registered", "message": f"Admin {data.first_name} {data.last_name} registered"}
+    raise HTTPException(status_code=403, detail="Public administrator registration is disabled. Contact the project owner.")
 
 
 @router.post("/login")
-async def login_admin(data: AdminCredentials, db: AsyncSession = Depends(get_db)):
-    r = await db.execute(
-        text("SELECT admin_id, first_name, last_name, is_active FROM site_admins WHERE username = :c"),
-        {"c": data.username},
-    )
-    row = r.mappings().first()
-    if not row:
-        raise HTTPException(status_code=401, detail="Invalid access code")
-    if not row["is_active"]:
-        raise HTTPException(status_code=403, detail="Admin account deactivated")
-    if row["first_name"].lower() != data.first_name.lower() or row["last_name"].lower() != data.last_name.lower():
-        raise HTTPException(status_code=401, detail="Name does not match access code")
+async def login_admin(db: AsyncSession = Depends(get_db),
+                      authenticated_id: int = Depends(authenticated_site_admin_id)):
+    # Clerk already authenticates the person; access codes and names are not
+    # authentication factors. The server-side grant supplies the identity.
+    row = await _verify_admin(authenticated_id, db)
 
     # Best-effort last_login stamp — column may not exist on legacy-provisioned tables.
     # Isolate in a savepoint so a missing column doesn't abort the login transaction.
@@ -162,7 +129,7 @@ async def dashboard(admin_id: int, db: AsyncSession = Depends(get_db)):
                 'campaign'::TEXT            AS report_type,
                 cr.reporter_creator_id      AS reporter_id,
                 cr.reported_campaign_id     AS campaign_id,
-                NULL::BIGINT                AS comment_id,
+                NULL::TEXT                  AS comment_id,
                 cr.reported_campaign_creator_id AS reported_creator_id,
                 cr.reason                   AS reason,
                 cr.notes                    AS details,
@@ -182,7 +149,7 @@ async def dashboard(admin_id: int, db: AsyncSession = Depends(get_db)):
             SELECT
                 pr.report_id::TEXT, 'profile'::TEXT,
                 pr.reporter_creator_id,
-                NULL::BIGINT, NULL::BIGINT,
+                NULL::BIGINT, NULL::TEXT,
                 pr.reported_profile_creator_id,
                 pr.reason, pr.notes, pr.status, pr.time_reported
             FROM profile_reports pr
@@ -190,15 +157,15 @@ async def dashboard(admin_id: int, db: AsyncSession = Depends(get_db)):
             SELECT
                 mr.report_id::TEXT, 'misc'::TEXT,
                 mr.creator_id           AS reporter_id,
-                NULL::BIGINT, NULL::BIGINT, NULL::TEXT,
+                NULL::BIGINT, NULL::TEXT, NULL::TEXT,
                 mr.report_reason        AS reason,
                 mr.report_description   AS details,
                 mr.status, mr.time_created
             FROM misc_reports mr
         ) reports)                                          AS total_reports,
             (SELECT COUNT(*) FROM blocked_users)                                    AS total_blocked,
-            (SELECT COUNT(*) FROM donations WHERE status = 'succeeded')             AS total_donations,
-            (SELECT COALESCE(SUM(amount),0) FROM donations WHERE status='succeeded') AS total_raised,
+            (SELECT COUNT(*) FROM donations WHERE LOWER(status::TEXT) = 'succeeded') AS total_donations,
+            (SELECT COALESCE(SUM(amount),0) FROM donations WHERE LOWER(status::TEXT)='succeeded') AS total_raised,
             (SELECT COUNT(*) FROM comments)                                         AS total_comments
     """))
     s = stats.mappings().first()
@@ -209,18 +176,18 @@ async def dashboard(admin_id: int, db: AsyncSession = Depends(get_db)):
             (SELECT COUNT(*) FROM creators  WHERE time_creation >= NOW() - INTERVAL '14 days' AND time_creation < NOW() - INTERVAL '7 days')  AS u_prev,
             (SELECT COUNT(*) FROM campaigns WHERE time_created >= NOW() - INTERVAL '7 days')                                                AS c_this,
             (SELECT COUNT(*) FROM campaigns WHERE time_created >= NOW() - INTERVAL '14 days' AND time_created < NOW() - INTERVAL '7 days')  AS c_prev,
-            (SELECT COALESCE(SUM(amount),0) FROM donations WHERE status='succeeded' AND time_created >= NOW() - INTERVAL '7 days')           AS r_this,
-            (SELECT COALESCE(SUM(amount),0) FROM donations WHERE status='succeeded' AND time_created >= NOW() - INTERVAL '14 days' AND time_created < NOW() - INTERVAL '7 days') AS r_prev
+            (SELECT COALESCE(SUM(amount),0) FROM donations WHERE LOWER(status::TEXT)='succeeded' AND created_at >= NOW() - INTERVAL '7 days') AS r_this,
+            (SELECT COALESCE(SUM(amount),0) FROM donations WHERE LOWER(status::TEXT)='succeeded' AND created_at >= NOW() - INTERVAL '14 days' AND created_at < NOW() - INTERVAL '7 days') AS r_prev
     """))
     w = week.mappings().first()
 
     daily = await db.execute(text("""
-        SELECT DATE(time_created) AS day,
+        SELECT DATE(created_at) AS day,
                COALESCE(SUM(amount),0) AS amount,
                COUNT(*) AS count
         FROM donations
-        WHERE status = 'succeeded' AND time_created >= NOW() - INTERVAL '14 days'
-        GROUP BY DATE(time_created)
+        WHERE LOWER(status::TEXT) = 'succeeded' AND created_at >= NOW() - INTERVAL '14 days'
+        GROUP BY DATE(created_at)
         ORDER BY day ASC
     """))
     chart = [{"date": str(r["day"]), "amount": float(r["amount"]), "count": r["count"]}
@@ -244,13 +211,13 @@ async def dashboard(admin_id: int, db: AsyncSession = Depends(get_db)):
     } for r in top.mappings()]
 
     recent = await db.execute(text("""
-        SELECT d.donation_id, d.amount, d.time_created, d.status,
+        SELECT d.id AS donation_id, d.amount, d.created_at AS time_created, LOWER(d.status::TEXT) AS status,
                d.donor_email, d.is_anonymous,
                c.title AS campaign_title, c.campaign_id
         FROM donations d
         LEFT JOIN campaigns c ON c.campaign_id = d.campaign_id
-        WHERE d.status = 'succeeded'
-        ORDER BY d.time_created DESC
+        WHERE LOWER(d.status::TEXT) = 'succeeded'
+        ORDER BY d.created_at DESC
         LIMIT 8
     """))
     recent_donations = [{
@@ -269,7 +236,7 @@ async def dashboard(admin_id: int, db: AsyncSession = Depends(get_db)):
                 'campaign'::TEXT            AS report_type,
                 cr.reporter_creator_id      AS reporter_id,
                 cr.reported_campaign_id     AS campaign_id,
-                NULL::BIGINT                AS comment_id,
+                NULL::TEXT                  AS comment_id,
                 cr.reported_campaign_creator_id AS reported_creator_id,
                 cr.reason                   AS reason,
                 cr.notes                    AS details,
@@ -289,7 +256,7 @@ async def dashboard(admin_id: int, db: AsyncSession = Depends(get_db)):
             SELECT
                 pr.report_id::TEXT, 'profile'::TEXT,
                 pr.reporter_creator_id,
-                NULL::BIGINT, NULL::BIGINT,
+                NULL::BIGINT, NULL::TEXT,
                 pr.reported_profile_creator_id,
                 pr.reason, pr.notes, pr.status, pr.time_reported
             FROM profile_reports pr
@@ -297,7 +264,7 @@ async def dashboard(admin_id: int, db: AsyncSession = Depends(get_db)):
             SELECT
                 mr.report_id::TEXT, 'misc'::TEXT,
                 mr.creator_id           AS reporter_id,
-                NULL::BIGINT, NULL::BIGINT, NULL::TEXT,
+                NULL::BIGINT, NULL::TEXT, NULL::TEXT,
                 mr.report_reason        AS reason,
                 mr.report_description   AS details,
                 mr.status, mr.time_created
@@ -362,7 +329,7 @@ async def list_campaigns(admin_id: int, search: str = "", status: str = "all",
                 'campaign'::TEXT            AS report_type,
                 cr.reporter_creator_id      AS reporter_id,
                 cr.reported_campaign_id     AS campaign_id,
-                NULL::BIGINT                AS comment_id,
+                NULL::TEXT                  AS comment_id,
                 cr.reported_campaign_creator_id AS reported_creator_id,
                 cr.reason                   AS reason,
                 cr.notes                    AS details,
@@ -382,7 +349,7 @@ async def list_campaigns(admin_id: int, search: str = "", status: str = "all",
             SELECT
                 pr.report_id::TEXT, 'profile'::TEXT,
                 pr.reporter_creator_id,
-                NULL::BIGINT, NULL::BIGINT,
+                NULL::BIGINT, NULL::TEXT,
                 pr.reported_profile_creator_id,
                 pr.reason, pr.notes, pr.status, pr.time_reported
             FROM profile_reports pr
@@ -390,7 +357,7 @@ async def list_campaigns(admin_id: int, search: str = "", status: str = "all",
             SELECT
                 mr.report_id::TEXT, 'misc'::TEXT,
                 mr.creator_id           AS reporter_id,
-                NULL::BIGINT, NULL::BIGINT, NULL::TEXT,
+                NULL::BIGINT, NULL::TEXT, NULL::TEXT,
                 mr.report_reason        AS reason,
                 mr.report_description   AS details,
                 mr.status, mr.time_created
@@ -587,7 +554,7 @@ async def list_reports(admin_id: int, db: AsyncSession = Depends(get_db)):
                 'campaign'::TEXT            AS report_type,
                 cr.reporter_creator_id      AS reporter_id,
                 cr.reported_campaign_id     AS campaign_id,
-                NULL::BIGINT                AS comment_id,
+                NULL::TEXT                  AS comment_id,
                 cr.reported_campaign_creator_id AS reported_creator_id,
                 cr.reason                   AS reason,
                 cr.notes                    AS details,
@@ -607,7 +574,7 @@ async def list_reports(admin_id: int, db: AsyncSession = Depends(get_db)):
             SELECT
                 pr.report_id::TEXT, 'profile'::TEXT,
                 pr.reporter_creator_id,
-                NULL::BIGINT, NULL::BIGINT,
+                NULL::BIGINT, NULL::TEXT,
                 pr.reported_profile_creator_id,
                 pr.reason, pr.notes, pr.status, pr.time_reported
             FROM profile_reports pr
@@ -615,7 +582,7 @@ async def list_reports(admin_id: int, db: AsyncSession = Depends(get_db)):
             SELECT
                 mr.report_id::TEXT, 'misc'::TEXT,
                 mr.creator_id           AS reporter_id,
-                NULL::BIGINT, NULL::BIGINT, NULL::TEXT,
+                NULL::BIGINT, NULL::TEXT, NULL::TEXT,
                 mr.report_reason        AS reason,
                 mr.report_description   AS details,
                 mr.status, mr.time_created
@@ -646,8 +613,8 @@ async def list_reports(admin_id: int, db: AsyncSession = Depends(get_db)):
         if has_comment_id:
             # reports table has a comment_id link — show comments that were actually reported
             cc = await db.execute(text(f"""
-                SELECT co.comment_id, co.comment_text, co.creator_id, cr.name AS commenter_name,
-                       co.campaign_id, ca.title AS campaign_title, co.time_created,
+                SELECT co.id AS comment_id, co.content AS comment_text, co.user_id AS creator_id, cr.name AS commenter_name,
+                       co.campaign_id, ca.title AS campaign_title, co.created_at AS time_created,
                        COUNT(r.{id_col}) AS report_count,
                        {reason_expr} AS reasons
                 FROM comments co
@@ -657,7 +624,7 @@ async def list_reports(admin_id: int, db: AsyncSession = Depends(get_db)):
                 'campaign'::TEXT            AS report_type,
                 cr.reporter_creator_id      AS reporter_id,
                 cr.reported_campaign_id     AS campaign_id,
-                NULL::BIGINT                AS comment_id,
+                NULL::TEXT                  AS comment_id,
                 cr.reported_campaign_creator_id AS reported_creator_id,
                 cr.reason                   AS reason,
                 cr.notes                    AS details,
@@ -677,7 +644,7 @@ async def list_reports(admin_id: int, db: AsyncSession = Depends(get_db)):
             SELECT
                 pr.report_id::TEXT, 'profile'::TEXT,
                 pr.reporter_creator_id,
-                NULL::BIGINT, NULL::BIGINT,
+                NULL::BIGINT, NULL::TEXT,
                 pr.reported_profile_creator_id,
                 pr.reason, pr.notes, pr.status, pr.time_reported
             FROM profile_reports pr
@@ -685,17 +652,17 @@ async def list_reports(admin_id: int, db: AsyncSession = Depends(get_db)):
             SELECT
                 mr.report_id::TEXT, 'misc'::TEXT,
                 mr.creator_id           AS reporter_id,
-                NULL::BIGINT, NULL::BIGINT, NULL::TEXT,
+                NULL::BIGINT, NULL::TEXT, NULL::TEXT,
                 mr.report_reason        AS reason,
                 mr.report_description   AS details,
                 mr.status, mr.time_created
             FROM misc_reports mr
-        ) r ON r.comment_id = co.comment_id
-                LEFT JOIN creators cr ON cr.creator_id = co.creator_id
+        ) r ON r.comment_id = co.id
+                LEFT JOIN creators cr ON cr.creator_id = co.user_id
                 LEFT JOIN campaigns ca ON ca.campaign_id = co.campaign_id
-                GROUP BY co.comment_id, co.comment_text, co.creator_id, cr.name,
-                         co.campaign_id, ca.title, co.time_created
-                ORDER BY report_count DESC, co.time_created DESC
+                GROUP BY co.id, co.content, co.user_id, cr.name,
+                         co.campaign_id, ca.title, co.created_at
+                ORDER BY report_count DESC, co.created_at DESC
                 LIMIT 50
             """))
             reported_comments = [{
@@ -711,12 +678,12 @@ async def list_reports(admin_id: int, db: AsyncSession = Depends(get_db)):
         else:
             # Fallback — show recent non-hidden comments as "needs review"
             cc = await db.execute(text("""
-                SELECT co.comment_id, co.comment_text, co.creator_id, cr.name AS commenter_name,
-                       co.campaign_id, ca.title AS campaign_title, co.time_created
+                SELECT co.id AS comment_id, co.content AS comment_text, co.user_id AS creator_id, cr.name AS commenter_name,
+                       co.campaign_id, ca.title AS campaign_title, co.created_at AS time_created
                 FROM comments co
-                LEFT JOIN creators cr ON cr.creator_id = co.creator_id
+                LEFT JOIN creators cr ON cr.creator_id = co.user_id
                 LEFT JOIN campaigns ca ON ca.campaign_id = co.campaign_id
-                ORDER BY co.time_created DESC
+                ORDER BY co.created_at DESC
                 LIMIT 20
             """))
             reported_comments = [{
@@ -740,10 +707,10 @@ async def list_reports(admin_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/comments/{comment_id}/delete")
-async def delete_comment(comment_id: int, admin_id: int,
+async def delete_comment(comment_id: str, admin_id: int,
                          db: AsyncSession = Depends(get_db)):
     await _verify_admin(admin_id, db)
-    await db.execute(text("DELETE FROM comments WHERE comment_id = :c"), {"c": comment_id})
+    await db.execute(text("DELETE FROM comments WHERE id = :c"), {"c": comment_id})
     await _log(db, admin_id, "delete_comment", "comment", str(comment_id))
     await db.commit()
     return {"status": "deleted", "comment_id": comment_id}
@@ -758,20 +725,20 @@ async def list_transactions(admin_id: int, status: str = "all", search: str = ""
     await _verify_admin(admin_id, db)
     clauses, params = [], {"limit": limit, "offset": offset}
     if status != "all":
-        clauses.append("d.status = :st"); params["st"] = status
+        clauses.append("LOWER(d.status::TEXT) = :st"); params["st"] = status.lower()
     if search:
         clauses.append("(LOWER(COALESCE(c.title,'')) LIKE LOWER(:s) OR LOWER(COALESCE(d.donor_email,'')) LIKE LOWER(:s))")
         params["s"] = f"%{search}%"
     where = "WHERE " + " AND ".join(clauses) if clauses else ""
 
     r = await db.execute(text(f"""
-        SELECT d.donation_id, d.amount, d.status, d.time_created, d.donor_email,
+        SELECT d.id AS donation_id, d.amount, LOWER(d.status::TEXT) AS status, d.created_at AS time_created, d.donor_email,
                d.is_anonymous, d.stripe_payment_intent_id, d.platform_fee,
                c.title AS campaign_title, c.campaign_id
         FROM donations d
         LEFT JOIN campaigns c ON c.campaign_id = d.campaign_id
         {where}
-        ORDER BY d.time_created DESC
+        ORDER BY d.created_at DESC
         LIMIT :limit OFFSET :offset
     """), params)
     rows = r.mappings().all()
@@ -785,7 +752,7 @@ async def list_transactions(admin_id: int, status: str = "all", search: str = ""
         SELECT COALESCE(SUM(amount),0) AS total,
                COALESCE(SUM(platform_fee),0) AS fees,
                COUNT(*) AS count
-        FROM donations WHERE status='succeeded'
+        FROM donations WHERE LOWER(status::TEXT)='succeeded'
     """))
     sm = summary.mappings().first()
 
@@ -864,7 +831,7 @@ async def list_pending_campaigns(admin_id: int, db: AsyncSession = Depends(get_d
     await _verify_admin(admin_id, db)
     r = await db.execute(text("""
         SELECT c.campaign_id, c.title,
-               COALESCE(c.description, '') AS description,
+               COALESCE(c.description_html, '') AS description,
                c.category, c.location,
                c.funding_goal_cents, c.status, c.creator_id, c.time_created,
                cr.name AS creator_name, cr.email AS creator_email
@@ -1009,7 +976,7 @@ async def lift_ban(creator_id: str, admin_id: int, db: AsyncSession = Depends(ge
     r = await db.execute(text("""
         DELETE FROM blocked_users
         WHERE creator_id = :cid AND ban_type IN ('soft_ban', 'full_ban')
-        RETURNING ban_id
+        RETURNING block_id
     """), {"cid": creator_id})
     removed = len(r.all())
     await _log(db, admin_id, "lift_ban", "user", creator_id, f"Lifted bans ({removed} rows)")
