@@ -98,7 +98,11 @@ app = FastAPI(
 
 def _cors_allow_origins() -> list[str]:
     """Local dev defaults + FRONTEND_URL + optional comma-separated CORS_ORIGINS."""
-    origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    origins: list[str] = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://[::1]:3000",
+    ]
     for raw in (
         os.getenv("FRONTEND_URL", ""),
         *(os.getenv("CORS_ORIGINS", "").split(",")),
@@ -112,6 +116,7 @@ def _cors_allow_origins() -> list[str]:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_allow_origins(),
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -145,6 +150,11 @@ app.include_router(misc_reports_router)
 app.include_router(donations_v2_router)  # /* v100_donations_v2_router */
 app.include_router(ledger_v2_router)  # /* v100_donations_v2_router */
 app.include_router(donations.router)
+
+from fastapi.staticfiles import StaticFiles
+uploads_dir = _backend_dir / "uploads"
+uploads_dir.mkdir(exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Auth Dependency

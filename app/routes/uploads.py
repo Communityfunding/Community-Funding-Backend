@@ -168,20 +168,30 @@ async def upload_campaign_file(
     ext = _extension_for_upload(content_type, filename)
     key = _build_campaign_object_key(campaign_id, ext)
 
-    try:
-        s3 = get_s3_client()
-        s3.put_object(
-            Bucket=S3_BUCKET,
-            Key=key,
-            Body=raw,
-            ContentType=content_type,
-        )
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"S3 upload failed: {str(e)}")
-
-    public_url = f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{key}"
+    has_aws = bool((os.getenv("AWS_ACCESS_KEY_ID") or "").strip() and (os.getenv("AWS_SECRET_ACCESS_KEY") or "").strip())
+    if has_aws:
+        try:
+            s3 = get_s3_client()
+            s3.put_object(
+                Bucket=S3_BUCKET,
+                Key=key,
+                Body=raw,
+                ContentType=content_type,
+            )
+            public_url = f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{key}"
+        except RuntimeError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"S3 upload failed: {str(e)}")
+    else:
+        from pathlib import Path
+        local_dir = Path("uploads") / str(campaign_id)
+        local_dir.mkdir(parents=True, exist_ok=True)
+        filename_only = key.split("/")[-1]
+        local_path = local_dir / filename_only
+        local_path.write_bytes(raw)
+        base_url = (os.getenv("BACKEND_URL") or os.getenv("NEXT_PUBLIC_API_URL") or "http://localhost:4000").rstrip("/")
+        public_url = f"{base_url}/uploads/{campaign_id}/{filename_only}"
 
     return {
         "public_url": public_url,

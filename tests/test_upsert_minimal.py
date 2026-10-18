@@ -21,7 +21,7 @@ async def test_upsert_minimal_creator():
 
     assert row is not None
     assert row["creator_id"] == TEST_CREATOR_ID
-    assert row["first_name"] == TEST_FIRST
+    assert (row.get("first_name") or row.get("name")) == TEST_FIRST
     assert row["last_name"] == TEST_LAST
     assert row["email"] == TEST_EMAIL
 

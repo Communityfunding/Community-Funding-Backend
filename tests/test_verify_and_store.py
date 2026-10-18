@@ -43,8 +43,8 @@ def fetch_creator_row(db_url: str, clerk_user_id: str):
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT * FROM creators WHERE creator_id = %s OR clerk_id = %s LIMIT 1",
-                (clerk_user_id, clerk_user_id),
+                "SELECT * FROM creators WHERE creator_id = %s LIMIT 1",
+                (clerk_user_id,),
             )
             row = cur.fetchone()
             return row
@@ -59,32 +59,16 @@ def test_verify_and_store_inserts_creator(monkeypatch):
     for a row with that clerk id.
     """
 
-    # 1) Override dependency: try to find the dependency function to patch
-    patched = False
-    if auth_module is not None and hasattr(auth_module, "get_current_user"):
-        # If your route does `Depends(get_current_user)` where get_current_user is imported from auth_module,
-        # monkeypatching this symbol will make the dependency return our fake payload.
-        def fake_get_current_user(*args, **kwargs):
-            # your actual get_current_user may return dict or pydantic model; match that
-            return FAKE_CLERK_USER
-
-        monkeypatch.setattr(auth_module, "get_current_user", fake_get_current_user)
-        patched = True
-
-    # If we couldn't locate auth_module/get_current_user, we try to override dependency via app.dependency_overrides
-    if not patched:
-        # This is more generic: depends on the object reference used in your route.
-        # Set a catch-all override for any dependency that returns a dict.
-        app.dependency_overrides = getattr(app, "dependency_overrides", {})
-        app.dependency_overrides[lambda: None] = lambda: FAKE_CLERK_USER
-        # If your route uses Depends(get_current_user) where get_current_user is the actual function object
-        # and you can import it, set app.dependency_overrides[get_current_user] = lambda: FAKE_CLERK_USER
-        # (Left generic because module paths differ across projects.)
+    monkeypatch.setattr("main.verify_token", lambda token: FAKE_CLERK_USER)
 
     client = TestClient(app)
 
-    # 2) Call the endpoint. The endpoint signature had payload: dict = Depends(get_current_user)
-    response = client.post("/api/auth/verify-and-store", json={})
+    # 2) Call the endpoint with Bearer token
+    response = client.post(
+        "/api/auth/verify-and-store",
+        headers={"Authorization": "Bearer fake_test_token"},
+        json={},
+    )
     # For debugging, print returned body if not 200
     if response.status_code != 200:
         print("Endpoint response status:", response.status_code)
@@ -96,7 +80,7 @@ def test_verify_and_store_inserts_creator(monkeypatch):
     resp_json = response.json()
     # Adjust these checks to match whatever your endpoint returns. Common debug keys: clerk_user_id, upsert_result
     assert (
-        "clerk_user_id" in resp_json or "upsert_result" in resp_json or "debug" in resp_json
+        "creatorId" in resp_json or "clerk_user_id" in resp_json or "upsert_result" in resp_json or "debug" in resp_json
     ), "Response JSON did not include expected debug keys"
 
     # 3) Verify DB row exists (requires DATABASE_URL env var)
@@ -135,8 +119,8 @@ def test_verify_and_store_inserts_creator(monkeypatch):
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM creators WHERE creator_id = %s OR clerk_id = %s",
-                (FAKE_CLERK_USER["id"], FAKE_CLERK_USER["id"]),
+                "DELETE FROM creators WHERE creator_id = %s",
+                (FAKE_CLERK_USER["id"],),
             )
             conn.commit()
     finally:

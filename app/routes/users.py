@@ -77,7 +77,6 @@ def _public_user_response(user: User) -> UserPublicResponse:
         username=user.username or user.id,
         name=user.name,
         last_name=user.last_name,
-        email=user.email,
         user_type=user.user_type,
         bio=user.bio,
         phone_number=user.phone_number,

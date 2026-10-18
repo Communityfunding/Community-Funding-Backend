@@ -15,6 +15,7 @@ import traceback
 import datetime
 from pathlib import Path
 from typing import Optional, Any
+import asyncio
 
 import asyncpg
 from dotenv import load_dotenv
@@ -73,6 +74,14 @@ async def get_pool() -> asyncpg.pool.Pool:
     Raises RuntimeError if DATABASE_URL is not configured.
     """
     global _pool
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+
+    if _pool is not None and (_pool._loop.is_closed() or (current_loop and _pool._loop is not current_loop)):
+        _pool = None
+
     if _pool is None:
         dsn = get_database_url()
         if not dsn:
@@ -98,7 +107,7 @@ async def init_db() -> None:
         # nothing to do in environments without DB configured
         return
     if dsn.startswith("sqlite"):
-        print("✅ Using SQLite — skipping asyncpg pool")
+        print("[OK] Using SQLite — skipping asyncpg pool")
         return
 
     pool = await get_pool()
@@ -147,7 +156,7 @@ async def init_db() -> None:
                 """)
             except Exception as e:
                 print(f"WARN: skip ALTER campaigns.{col} TYPE: {e}")
-    print("✅ asyncpg creators table ensured")
+    print("[OK] asyncpg creators table ensured")
 
 
 async def _creators_first_name_column(conn: asyncpg.Connection) -> str:
@@ -177,12 +186,16 @@ async def upsert_creator(
     email: Optional[str] = None,
     time_creation: Optional[datetime.datetime] = None,
     user_type: Optional[int] = None,
+    first_name: Optional[str] = None,
 ) -> Any:
     """
     Insert or update a creators row using creator_id as the unique key.
 
     Returns the returned row from the DB (asyncpg.Record) or None on failure.
     """
+    if name is None and first_name is not None:
+        name = first_name
+
     if not get_database_url():
         raise RuntimeError("DATABASE_URL is not configured; cannot upsert creator")
 

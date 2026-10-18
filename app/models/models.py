@@ -99,6 +99,54 @@ class User(Base):
     # Relationships
     campaigns = relationship("Campaign", back_populates="creator")
 
+    def __init__(self, **kwargs):
+        if "is_admin" in kwargs:
+            is_adm = kwargs.pop("is_admin")
+            if is_adm and "user_type" not in kwargs:
+                kwargs["user_type"] = 2
+        super().__init__(**kwargs)
+
+    @property
+    def is_admin(self) -> bool:
+        return (getattr(self, "user_type", 1) or 0) == 2
+
+    @is_admin.setter
+    def is_admin(self, value: bool) -> None:
+        self.user_type = 2 if value else 1
+
+    @property
+    def email_verified(self) -> bool:
+        return getattr(self, "_email_verified", True)
+
+    @email_verified.setter
+    def email_verified(self, value: bool) -> None:
+        self._email_verified = value
+
+    @property
+    def stripe_connect_onboarded(self) -> bool:
+        return getattr(self, "_stripe_connect_onboarded", False)
+
+    @stripe_connect_onboarded.setter
+    def stripe_connect_onboarded(self, value: bool) -> None:
+        self._stripe_connect_onboarded = value
+
+    @property
+    def stripe_customer_id(self) -> str | None:
+        return getattr(self, "_stripe_customer_id", None)
+
+    @stripe_customer_id.setter
+    def stripe_customer_id(self, value: str | None) -> None:
+        self._stripe_customer_id = value
+
+    @property
+    def stripe_connect_account_id(self) -> str | None:
+        return getattr(self, "_stripe_connect_account_id", None)
+
+    @stripe_connect_account_id.setter
+    def stripe_connect_account_id(self, value: str | None) -> None:
+        self._stripe_connect_account_id = value
+
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # Campaigns (Projects)
