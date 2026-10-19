@@ -10,4 +10,5 @@ async def main():
         row = await conn.fetchrow("SELECT * FROM creators WHERE creator_id='user_test_manual_123'")
         print("row found:", row)
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

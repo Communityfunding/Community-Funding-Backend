@@ -4,7 +4,7 @@ Aligned with actual PostgreSQL database schema.
 """
 
 from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, List
+from typing import Optional, List, Union
 from datetime import datetime
 from decimal import Decimal
 
@@ -52,6 +52,7 @@ class UserUpdate(BaseModel):
     bio: Optional[str] = None
     website: Optional[str] = None
     username: Optional[str] = None
+    avatar_url: Optional[str] = None
 
 
 class UserResponse(BaseModel):
@@ -78,7 +79,6 @@ class UserPublicResponse(BaseModel):
     name: Optional[str] = None
     last_name: Optional[str] = None
     username: Optional[str] = None
-    email: Optional[str] = None
     user_type: Optional[int] = None
     bio: Optional[str] = None
     avatar_url: Optional[str] = None
@@ -87,7 +87,6 @@ class UserPublicResponse(BaseModel):
     state: Optional[str] = None
     time_zone: Optional[str] = None
     website: Optional[str] = None
-    avatar_url: Optional[str] = None
     created_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
@@ -271,7 +270,7 @@ class CampaignUpdateCreate(BaseModel):
 
 class CampaignUpdateResponse(BaseModel):
     id: Optional[str] = None
-    campaign_id: Optional[str] = None
+    campaign_id: Optional[Union[str, int]] = None
     author_id: Optional[str] = None
     title: Optional[str] = None
     content: Optional[str] = None
@@ -289,10 +288,12 @@ class CommentCreate(BaseModel):
 
 
 class CommentResponse(BaseModel):
-    id: int  # comment_id
-    campaign_id: int
+    id: Union[str, int]  # comment_id
+    campaign_id: Union[str, int]
     creator_id: Optional[str] = None
+    user_id: Optional[str] = None
     comment_text: Optional[str] = None
+    content: Optional[str] = None
     created_at: Optional[datetime] = None  # time_created
     # Computed fields (not in DB)
     user_name: Optional[str] = None
@@ -306,15 +307,22 @@ class CommentResponse(BaseModel):
 # ════════════════════════════════════════════════════════════════════════════
 
 class ReportCreate(BaseModel):
-    campaign_id: int
+    campaign_id: Optional[int] = None
+    comment_id: Optional[Union[str, int]] = None
     strength_id: Optional[int] = None
+    reason: Optional[str] = "other"
+    details: Optional[str] = None
 
 
 class ReportResponse(BaseModel):
-    id: int  # report_id
-    reporter_id: str
+    id: Union[str, int]  # report_id
+    reporter_id: Optional[str] = None
     campaign_id: Optional[int] = None
+    comment_id: Optional[Union[str, int]] = None
     strength_id: Optional[int] = None
+    reason: Optional[str] = None
+    details: Optional[str] = None
+    status: Optional[str] = None
     created_at: Optional[datetime] = None  # time_created
 
     model_config = {"from_attributes": True}

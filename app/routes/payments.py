@@ -247,7 +247,7 @@ async def stripe_webhook(
             )
             campaign = campaign_result.scalar_one_or_none()
             if campaign:
-                campaign.raised_amount = (campaign.raised_amount or 0) + donation.amount
+                campaign.raised_amount = int((campaign.raised_amount or 0) + donation.amount)
                 campaign.donors_count = (campaign.donors_count or 0) + 1
                 if float(campaign.raised_amount) >= float(campaign.goal_amount):
                     campaign.status = CampaignStatus.FUNDED
@@ -271,7 +271,7 @@ async def stripe_webhook(
             )
             campaign = campaign_result.scalar_one_or_none()
             if campaign:
-                campaign.raised_amount = (campaign.raised_amount or 0) + donation.amount
+                campaign.raised_amount = int((campaign.raised_amount or 0) + donation.amount)
                 campaign.donors_count = (campaign.donors_count or 0) + 1
                 if float(campaign.raised_amount) >= float(campaign.goal_amount):
                     campaign.status = CampaignStatus.FUNDED
@@ -309,9 +309,9 @@ async def stripe_webhook(
             )
             campaign = campaign_result.scalar_one_or_none()
             if campaign:
-                campaign.raised_amount = max(
-                    Decimal("0"), (campaign.raised_amount or 0) - Decimal(str(refund_amount))
-                )
+                campaign.raised_amount = int(max(
+                    0, (campaign.raised_amount or 0) - int(refund_amount)
+                ))
 
     # ── account.updated (Stripe Connect) ──
     elif event_type == "account.updated":

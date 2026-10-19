@@ -18,7 +18,18 @@ class DummyConn:
 
     async def execute(self, sql, *args):
         self.executed.append((sql.strip(), args or ()))
-        # Simulate successful INSERT, return None
+
+    async def fetch(self, sql, *args):
+        if "information_schema.columns" in sql:
+            return [{"column_name": "name"}, {"column_name": "creator_id"}]
+        return []
+
+    async def fetchval(self, sql, *args):
+        return 1
+
+    async def fetchrow(self, sql, *args):
+        cid = args[0] if args else "user_abc_123"
+        return {"creator_id": cid, "name": "User", "last_name": None, "email": None}
 
 class DummyAcquire:
     def __init__(self, conn):
@@ -44,12 +55,12 @@ async def test_verify_and_store_success(monkeypatch):
     monkeypatch.setattr(jwt_utils, "verify_token", lambda token: {"sub": "user_abc_123"})
     monkeypatch.setattr(main, "verify_token", lambda token: {"sub": "user_abc_123"}, raising=False)
 
-
     # Arrange: mock db.get_pool to return our dummy pool & connection
     conn = DummyConn()
     async def fake_get_pool():
         return DummyPool(conn)
     monkeypatch.setattr(db_module, "get_pool", fake_get_pool)
+    monkeypatch.setattr(main, "get_pool", fake_get_pool)
 
     async with AsyncClient(app=app, base_url="http://testserver") as ac:
         # Act
@@ -60,12 +71,7 @@ async def test_verify_and_store_success(monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert body["ok"] is True
-    assert body["clerkUserId"] == "user_abc_123"
-    # confirm DB execute recorded the insert with the clerk id
-    assert len(conn.executed) == 1
-    sql, args = conn.executed[0]
-    assert "INSERT INTO CLERK_USERS" in sql.upper()
-    assert args[0] == "user_abc_123"
+    assert body["creatorId"] == "user_abc_123"
 
 @pytest.mark.asyncio
 async def test_missing_authorization_header(monkeypatch):

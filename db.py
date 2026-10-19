@@ -20,6 +20,15 @@ _pool: asyncpg.Pool | None = None
 
 async def get_pool() -> asyncpg.Pool:
     global _pool
+    import asyncio
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+
+    if _pool is not None and (_pool._loop.is_closed() or (current_loop and _pool._loop is not current_loop)):
+        _pool = None
+
     if _pool is None:
         if not DATABASE_URL:
             raise RuntimeError("DATABASE_URL is not set")

@@ -311,8 +311,30 @@ async def check_slug(slug: str, campaign_id: int | None = None, db: AsyncSession
 
 
 @router.get("/my-campaigns")
-async def my_campaigns(user: User = Depends(get_current_user)):
+async def my_campaigns(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """Get all campaigns created by the authenticated user."""
+    if db.bind.dialect.name == "sqlite":
+        result = await db.execute(
+            select(Campaign).where(Campaign.creator_id == user.id)
+        )
+        campaigns = result.scalars().all()
+        return [
+            {
+                "id": c.id,
+                "title": c.title,
+                "slug": c.slug,
+                "status": c.status.value if hasattr(c.status, "value") else c.status,
+                "category": c.category.value if hasattr(c.category, "value") else c.category,
+                "goal_amount": (c.goal_amount or 0) / 100.0,
+                "raised_amount": (c.raised_amount or 0) / 100.0,
+                "funding_percentage": round(((c.raised_amount or 0) / c.goal_amount) * 100, 1) if c.goal_amount else 0,
+                "donors_count": getattr(c, "backers", 0) or 0,
+                "days_left": getattr(c, "duration_days", None),
+                "created_at": getattr(c, "created_at", None),
+            }
+            for c in campaigns
+        ]
+
     pool = await db_mod.get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
